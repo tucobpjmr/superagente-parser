@@ -5,9 +5,11 @@ Endpoint:
   GET  /health → healthcheck per Railway
 """
 
+import asyncio
 import io
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -86,20 +88,30 @@ async def parse_file(
             detail=f"File troppo grande: {size_mb:.1f}MB (max {MAX_UPLOAD_MB}MB)",
         )
 
+    t0 = time.perf_counter()
     log.info(f"Parsing {file.filename} ({size_mb:.2f}MB, modulo={modulo})")
 
     # --- 1. Estrai testo con Markitdown ---
+    # Eseguito in thread executor con timeout: l'OCR su PDF grandi può bloccarsi a lungo.
     try:
-        # Markitdown gestisce OCR su immagini e PDF scansionati automaticamente
-        # se le librerie OCR sono installate (vedi Dockerfile).
-        result = md_converter.convert_stream(
-            io.BytesIO(contents),
-            file_extension=ext,
+        loop = asyncio.get_running_loop()
+        buf = io.BytesIO(contents)
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: md_converter.convert_stream(buf, file_extension=ext),
+            ),
+            timeout=60.0,
         )
         markdown_text = (result.text_content or "").strip()
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=422, detail="Timeout parsing documento (>60s)")
     except Exception as e:
         log.exception("Markitdown error")
         raise HTTPException(status_code=422, detail=f"Errore parsing: {e}")
+
+    t_md = time.perf_counter()
+    log.info(f"Markitdown: {t_md - t0:.2f}s, chars={len(markdown_text)}")
 
     if not markdown_text:
         raise HTTPException(
@@ -112,15 +124,19 @@ async def parse_file(
     if not chunks:
         raise HTTPException(status_code=422, detail="Nessun chunk generato")
 
-    log.info(f"Generati {len(chunks)} chunk")
+    t_chunk = time.perf_counter()
+    log.info(f"Chunking: {t_chunk - t_md:.2f}s, chunks={len(chunks)}")
 
-    # --- 3. Embedding batch ---
+    # --- 3. Embedding batch (parallelo) ---
     try:
         texts = [c["contenuto"] for c in chunks]
         embeddings = await generate_embeddings_batch(texts)
     except Exception as e:
         log.exception("Embedding error")
         raise HTTPException(status_code=502, detail=f"Errore OpenAI: {e}")
+
+    t_emb = time.perf_counter()
+    log.info(f"Embedding: {t_emb - t_chunk:.2f}s | Totale: {t_emb - t0:.2f}s")
 
     # --- 4. Costruisci risposta pronta per INSERT su Supabase ---
     chunks_out = [

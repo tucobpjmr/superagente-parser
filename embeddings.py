@@ -2,8 +2,10 @@
 Generazione embedding via OpenAI text-embedding-3-small.
 Batch fino a 100 input per chiamata (limite prudenziale, OpenAI ne accetta 2048).
 Retry con backoff esponenziale per errori transitori.
+I batch vengono processati in parallelo con asyncio.gather.
 """
 
+import asyncio
 import os
 from typing import List
 from openai import AsyncOpenAI
@@ -45,15 +47,16 @@ async def _embed_batch(texts: List[str]) -> List[List[float]]:
 async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """
     Genera embedding per lista di testi, in batch da BATCH_SIZE.
+    I batch vengono inviati a OpenAI in parallelo (asyncio.gather).
     Ritorna lista di vettori nello stesso ordine dell'input.
     """
     if not texts:
         return []
 
-    results: List[List[float]] = []
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i : i + BATCH_SIZE]
-        embeddings = await _embed_batch(batch)
-        results.extend(embeddings)
+    batches = [texts[i : i + BATCH_SIZE] for i in range(0, len(texts), BATCH_SIZE)]
+    batch_results = await asyncio.gather(*[_embed_batch(b) for b in batches])
 
+    results: List[List[float]] = []
+    for embeddings in batch_results:
+        results.extend(embeddings)
     return results

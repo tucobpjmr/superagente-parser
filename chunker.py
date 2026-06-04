@@ -7,7 +7,7 @@ Strategia:
 """
 
 import re
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
@@ -46,20 +46,23 @@ def _split_by_headings(markdown: str) -> List[Dict]:
     return sections
 
 
-def _split_by_words(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """Fallback: split per word-count con overlap."""
-    words = text.split()
-    if len(words) <= chunk_size:
-        return [text]
+def _split_by_words(words: List[str], chunk_size: int, overlap: int) -> List[Tuple[str, int]]:
+    """Fallback: split per word-count con overlap.
 
-    chunks = []
+    Accetta lista parole già calcolata dal chiamante (evita un secondo split).
+    Ritorna lista di (testo, n_parole).
+    """
+    if len(words) <= chunk_size:
+        return [(" ".join(words), len(words))]
+
+    result: List[Tuple[str, int]] = []
     step = chunk_size - overlap
     for i in range(0, len(words), step):
-        chunk = " ".join(words[i : i + chunk_size])
-        chunks.append(chunk)
-        if i + chunk_size >= len(words):
+        end = min(i + chunk_size, len(words))
+        result.append((" ".join(words[i:end]), end - i))
+        if end >= len(words):
             break
-    return chunks
+    return result
 
 
 def chunk_markdown(
@@ -79,31 +82,44 @@ def chunk_markdown(
         Lista di dict: { chunk_index, contenuto, heading }
     """
     sections = _split_by_headings(markdown)
-    raw_chunks = []
+    raw_chunks: List[Dict] = []
 
     for sec in sections:
-        if _word_count(sec["testo"]) <= chunk_size:
-            raw_chunks.append({"contenuto": sec["testo"], "heading": sec["heading"]})
-        else:
-            # Sezione troppo grande → spezza per parole, mantieni heading come prefisso
-            sub_texts = _split_by_words(sec["testo"], chunk_size, overlap)
-            for sub in sub_texts:
-                raw_chunks.append({"contenuto": sub, "heading": sec["heading"]})
+        words = sec["testo"].split()  # split una volta sola per sezione
+        n_words = len(words)
 
-    # Merge chunk troppo piccoli col successivo
-    merged = []
-    buffer = None
-    for ch in raw_chunks:
-        if buffer is None:
-            buffer = ch
-            continue
-        if _word_count(buffer["contenuto"]) < min_chunk_words:
-            buffer["contenuto"] = buffer["contenuto"] + "\n\n" + ch["contenuto"]
+        if n_words <= chunk_size:
+            raw_chunks.append({"contenuto": sec["testo"], "heading": sec["heading"], "_wc": n_words})
         else:
-            merged.append(buffer)
-            buffer = ch
-    if buffer is not None:
-        merged.append(buffer)
+            # Sezione troppo grande → spezza per parole, mantieni heading
+            for sub_text, sub_wc in _split_by_words(words, chunk_size, overlap):
+                raw_chunks.append({"contenuto": sub_text, "heading": sec["heading"], "_wc": sub_wc})
+
+    # Merge chunk troppo piccoli col successivo.
+    # Accumulo in lista per evitare concatenazioni di stringhe intermedie.
+    merged: List[Dict] = []
+    buf_parts: List[str] = []
+    buf_heading = None
+    buf_wc = 0
+
+    for ch in raw_chunks:
+        if not buf_parts:
+            buf_parts = [ch["contenuto"]]
+            buf_heading = ch["heading"]
+            buf_wc = ch["_wc"]
+            continue
+
+        if buf_wc < min_chunk_words:
+            buf_parts.append(ch["contenuto"])
+            buf_wc += ch["_wc"]
+        else:
+            merged.append({"contenuto": "\n\n".join(buf_parts), "heading": buf_heading})
+            buf_parts = [ch["contenuto"]]
+            buf_heading = ch["heading"]
+            buf_wc = ch["_wc"]
+
+    if buf_parts:
+        merged.append({"contenuto": "\n\n".join(buf_parts), "heading": buf_heading})
 
     # Aggiungi chunk_index
     return [
