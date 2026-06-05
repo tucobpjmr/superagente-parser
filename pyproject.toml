@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["main"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

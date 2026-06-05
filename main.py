@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, Header, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
 
@@ -62,7 +62,7 @@ async def parse_file(
     modulo: str = Form(...),
     categoria: str = Form(...),
     documento_id: Optional[str] = Form(None),
-    authorization: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
 ):
     # --- Auth opzionale ---
     if PARSER_SHARED_SECRET:
