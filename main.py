@@ -2,7 +2,7 @@
 Microservizio FastAPI per parsing documenti + embedding.
 Endpoint:
   POST /parse  → riceve file, ritorna chunk con embedding
-  GET  /health → healthcheck per Railway
+  GET  /ready  → healthcheck per Railway (alias: /health)
 """
 
 import io
@@ -51,6 +51,7 @@ md_converter = MarkItDown()
 
 
 @app.get("/health")
+@app.get("/ready")
 async def health():
     return {"status": "ok", "embedding_dim": EMBEDDING_DIM}
 

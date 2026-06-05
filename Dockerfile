@@ -33,7 +33,7 @@ EXPOSE 8000
 
 # Healthcheck (Railway lo usa per il rolling deploy)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:'+__import__('os').environ.get('PORT','8000')+'/health').read()" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:'+__import__('os').environ.get('PORT','8000')+'/ready').read()" || exit 1
 
 # Avvio con uvicorn
 CMD uvicorn main:app --host 0.0.0.0 --port ${PORT} --workers 2

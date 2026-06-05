@@ -30,7 +30,7 @@ Microservizio FastAPI per estrarre testo da documenti (PDF, DOCX, XLSX, PPTX, HT
 }
 ```
 
-### `GET /health`
+### `GET /ready` (alias: `/health`)
 Healthcheck per Railway.
 
 ## Sviluppo locale
