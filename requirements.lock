@@ -10,6 +10,10 @@ anyio==4.13.0 \
     #   openai
     #   starlette
     #   watchfiles
+azure-ai-contentunderstanding==1.2.0b1 \
+    --hash=sha256:0379f3e5d7ae75fd7b5a4275d036935a9341965d946f46c902fe3ba641be41a0 \
+    --hash=sha256:ad493bd8021887f937734d769cbedc04c04f495b101479b0ac3d74ede6203e4f
+    # via markitdown
 azure-ai-documentintelligence==1.0.2 \
     --hash=sha256:4d75a2513f2839365ebabc0e0e1772f5601b3a8c9a71e75da12440da13b63484 \
     --hash=sha256:e1fb446abbdeccc9759d897898a0fe13141ed29f9ad11fc705f951925822ed59
@@ -18,6 +22,7 @@ azure-core==1.41.0 \
     --hash=sha256:522b4011e8180b1a3dcd2024396a4e7fe9ac37fb8597db47163d230b5efe892d \
     --hash=sha256:f46ff5dfcd230f25cf1c19e8a34b8dc08a337b2503e268bb600a16c00db8ad5a
     # via
+    #   azure-ai-contentunderstanding
     #   azure-ai-documentintelligence
     #   azure-identity
 azure-identity==1.25.3 \
@@ -433,7 +438,9 @@ cryptography==48.0.0 \
 defusedxml==0.7.1 \
     --hash=sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69 \
     --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
-    # via youtube-transcript-api
+    # via
+    #   markitdown
+    #   youtube-transcript-api
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
@@ -531,7 +538,9 @@ iniconfig==2.3.0 \
 isodate==0.7.2 \
     --hash=sha256:28009937d8031054830160fce6d409ed342816b543597cece116d966c6d99e15 \
     --hash=sha256:4cd1aa0f43ca76f4a6c6c0292a85f40b35ec2e43e315b59f06e6d32171a953e6
-    # via azure-ai-documentintelligence
+    # via
+    #   azure-ai-contentunderstanding
+    #   azure-ai-documentintelligence
 jiter==0.15.0 \
     --hash=sha256:01a8222cf05ab1128e239421156c207949808acaaea2bdfd33130ae666786e86 \
     --hash=sha256:032396229564bca02440396bd327710719f724f5e7b7e9f7a8eb3faa4a2c2281 \
@@ -778,7 +787,9 @@ lxml==6.1.1 \
     --hash=sha256:fe0306bd29505a9177aac19f1877174b0e7422c222a59f70b2cd41633448c3dc \
     --hash=sha256:ff3f333630ab480244a1bff72043e511a91eb22e7595dead8653ee5612dd8f3d \
     --hash=sha256:ffecec8eb889b58ba9be5b95fb1cc78e22ea8eedea38e8736a1568fe1979250e
-    # via python-pptx
+    # via
+    #   markitdown
+    #   python-pptx
 magika==0.6.3 \
     --hash=sha256:3d9661eedbdf445ac9567e97e7ceefb93545d77a6a32858139ea966b5806fb64 \
     --hash=sha256:7cc52aa7359af861957043e2bf7265ed4741067251c104532765cd668c0c0cb1 \
@@ -786,17 +797,17 @@ magika==0.6.3 \
     --hash=sha256:e57f75674447b20cab4db928ae58ab264d7d8582b55183a0b876711c2b2787f3 \
     --hash=sha256:eda443d08006ee495e02083b32e51b98cb3696ab595a7d13900d8e2ef506ec9d
     # via markitdown
-mammoth==1.12.0 \
-    --hash=sha256:10955a55d9173167b550de3aeb8f2ed48b420756fd66378156b2f78661a33dd5 \
-    --hash=sha256:d195ae2403b98276d7646e252035b6f70adb255987bb267e9eac6bc6531fe38f
+mammoth==1.11.0 \
+    --hash=sha256:a0f59e442f34d5b6447f4b0999306cbf3e67aaabfa8cb516f878fb1456744637 \
+    --hash=sha256:c077ab0d450bd7c0c6ecd529a23bf7e0fa8190c929e28998308ff4eada3f063b
     # via markitdown
 markdownify==1.2.2 \
     --hash=sha256:3f02d3cc52714084d6e589f70397b6fc9f2f3a8531481bf35e8cc39f975e186a \
     --hash=sha256:b274f1b5943180b031b699b199cbaeb1e2ac938b75851849a31fd0c3d6603d09
     # via markitdown
-markitdown==0.1.1 \
-    --hash=sha256:98ea8c009fe174b37ef933e00f4364214e8fed35691178b8521b13604d0c4a58 \
-    --hash=sha256:da97a55a45a3d775ea758e88a344d5cac94ee97115fb0293f99027d32c2fc3f6
+markitdown==0.1.6 \
+    --hash=sha256:07b2d5bf87b5c53e13a9f2fdc440df8ccc85e26f40c1e557781727b700049775 \
+    --hash=sha256:e5bdbaffd971b29598c7c39ef0e9afce2f08c0751fbfa4e4257678ebaf8cfc7e
     # via -r requirements.txt
 msal==1.37.0 \
     --hash=sha256:1b1672a33ee467c1d70b341bb16cafd51bb3c817147a95b93263794b03971bec \
@@ -979,9 +990,15 @@ pandas==3.0.3 \
     --hash=sha256:f8894dc474d648fe7b6ff0ca9b0bd73950d19952bc1a6534540762c5d79d305c \
     --hash=sha256:fed2ff7fd9779120e388e285fc029bd5cf9490cdd2e4166a9ee22c0e49a9ab09
     # via markitdown
-pdfminer-six==20260107 \
-    --hash=sha256:366585ba97e80dffa8f00cebe303d2f381884d8637af4ce422f1df3ef38111a9 \
-    --hash=sha256:96bfd431e3577a55a0efd25676968ca4ce8fd5b53f14565f85716ff363889602
+pdfminer-six==20251230 \
+    --hash=sha256:9ff2e3466a7dfc6de6fd779478850b6b7c2d9e9405aa2a5869376a822771f485 \
+    --hash=sha256:e8f68a14c57e00c2d7276d26519ea64be1b48f91db1cdc776faa80528ca06c1e
+    # via
+    #   markitdown
+    #   pdfplumber
+pdfplumber==0.11.9 \
+    --hash=sha256:33ec5580959ba524e9100138746e090879504c42955df1b8a997604dd326c443 \
+    --hash=sha256:481224b678b2bbdbf376e2c39bf914144eef7c3d301b4a28eebf0f7f6109d6dc
     # via markitdown
 pillow==12.2.0 \
     --hash=sha256:00a2865911330191c0b818c59103b58a5e697cae67042366970a6b6f1b20b7f9 \
@@ -1075,7 +1092,9 @@ pillow==12.2.0 \
     --hash=sha256:f490f9368b6fc026f021db16d7ec2fbf7d89e2edb42e8ec09d2c60505f5729c7 \
     --hash=sha256:fb043ee2f06b41473269765c2feae53fc2e2fbf96e5e22ca94fb5ad677856f06 \
     --hash=sha256:fc3d34d4a8fbec3e88a79b92e5465e0f9b842b628675850d860b8bd300b159f5
-    # via python-pptx
+    # via
+    #   pdfplumber
+    #   python-pptx
 pluggy==1.6.0 \
     --hash=sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3 \
     --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
@@ -1236,6 +1255,30 @@ pyjwt==2.13.0 \
     # via
     #   msal
     #   pyjwt
+pypdfium2==5.9.0 \
+    --hash=sha256:040f5513b808db705d4878f57e2bf0b9dc6e6a0ad8d765c36cf62febf3933b28 \
+    --hash=sha256:06508c33b9772cf3878e48364c6e14c70cefc18a3abd6983ac9f338da9305275 \
+    --hash=sha256:07e6ba170d577eabf60dbba701d051c64318dd029d38ca5907d83ae1a66fe779 \
+    --hash=sha256:1894511a0e862e7ec5679f3a6dc43ac72c4ef92c7ca438357203913e8634a643 \
+    --hash=sha256:1d902e03dff5efd51d93cd23d3e55bde53802fa6207bcd0e455239518859a069 \
+    --hash=sha256:25ff1a5abd08ff9e87f62e5dac114ea95647c257fbbdbe029be8db71a6d7650b \
+    --hash=sha256:38a058dbd4929acaf0ab9171179eb86c24d8c6655a6836006796105a9f200890 \
+    --hash=sha256:565ddfc98795fd2f6054b544ee9791d7b9032f9cf77a57891b6e501fafd0ef3f \
+    --hash=sha256:6c4fbe3a7190b329c526358fb2855d797f7b74b5ecfc61d19657ef20bcebc108 \
+    --hash=sha256:6cf38d7ad3575947b82384869f2ab69ba345eb21d83118d25db3e83f967b0421 \
+    --hash=sha256:77f7479a28b43aa658735e3ce79cfd1fccd5d42db035c21bb4c26e8bd7e280e5 \
+    --hash=sha256:7cdc8e5d2f8d82add1e4f70a4fbe5f3b33c17f301ebde38c669fd7f78a7d032c \
+    --hash=sha256:7ce3a3dd23ec0adaa079d8be54565ba2aa2f6060e76a4989cd42dabc163d74ee \
+    --hash=sha256:90610d352f050b065b703f3a46602a852fce7dd8787300c8c7a472485b644d8f \
+    --hash=sha256:91914837c4a4285b3e0724a84eca8079363db7475acbcab405933d1807785664 \
+    --hash=sha256:ae177938f5cf95a275db25a4f8553e2ebd954ecda2f9bc84848ba4b027ce438f \
+    --hash=sha256:b0057dc8c2033584dc3e61afb5f23a135dab52b081695b435e27f9b7b074c605 \
+    --hash=sha256:b7b760bc2957ecf73c274af6ed8b168a2dcb328ac0a0f7ed6123cd92f6e7c9c9 \
+    --hash=sha256:db1274bd27844db6fda17ef1dbcd0026c47d357437058d838e98060c0da9e92e \
+    --hash=sha256:e93f0cf440169a3e445e6fbd06c803877e7418f3e13254287875cb67f208bb5a \
+    --hash=sha256:f4991ae39bcea757552579bba4aebfaedb71c96dd35c2292f957b8ac9132f1ff \
+    --hash=sha256:ffe49edde2ac86f28ca7e58f565255a442f38a7508fff31b79a55f508f25a31e
+    # via pdfplumber
 pytest==9.0.3 \
     --hash=sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9 \
     --hash=sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c
@@ -1383,6 +1426,7 @@ typing-extensions==4.15.0 \
     --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548
     # via
     #   anyio
+    #   azure-ai-contentunderstanding
     #   azure-ai-documentintelligence
     #   azure-core
     #   azure-identity
