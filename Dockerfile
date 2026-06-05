@@ -20,9 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Installa dipendenze Python
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Installa dipendenze Python (lock file con hash verificati)
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Copia codice
 COPY . .
