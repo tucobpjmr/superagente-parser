@@ -4,6 +4,7 @@ Batch fino a 100 input per chiamata (limite prudenziale, OpenAI ne accetta 2048)
 Retry con backoff esponenziale per errori transitori.
 """
 
+import asyncio
 import os
 from typing import List
 from openai import AsyncOpenAI
@@ -11,9 +12,9 @@ from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_excep
 import openai
 
 
-EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIM = 1536
-BATCH_SIZE = 100
+BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
 
 _client: AsyncOpenAI | None = None
 
@@ -44,16 +45,14 @@ async def _embed_batch(texts: List[str]) -> List[List[float]]:
 
 async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     """
-    Genera embedding per lista di testi, in batch da BATCH_SIZE.
+    Genera embedding per lista di testi, in batch da BATCH_SIZE eseguiti in parallelo.
     Ritorna lista di vettori nello stesso ordine dell'input.
     """
     if not texts:
         return []
 
-    results: List[List[float]] = []
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i : i + BATCH_SIZE]
-        embeddings = await _embed_batch(batch)
-        results.extend(embeddings)
-
-    return results
+    batches = [texts[i : i + BATCH_SIZE] for i in range(0, len(texts), BATCH_SIZE)]
+    results_nested: List[List[List[float]]] = await asyncio.gather(
+        *[_embed_batch(b) for b in batches]
+    )
+    return [emb for batch_result in results_nested for emb in batch_result]

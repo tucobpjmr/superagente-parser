@@ -90,20 +90,37 @@ def chunk_markdown(
             for sub in sub_texts:
                 raw_chunks.append({"contenuto": sub, "heading": sec["heading"]})
 
-    # Merge chunk troppo piccoli col successivo
-    merged = []
-    buffer = None
+    # Merge chunk troppo piccoli col successivo.
+    # Fix: usa list+join invece di concatenazioni O(n²) e riassorbi l'ultima
+    # coda piccola nel chunk precedente invece di lasciarla orfana.
+    merged: List[Dict] = []
+    buf_parts: List[str] = []
+    buf_heading = None
+    buf_words: int = 0
+
     for ch in raw_chunks:
-        if buffer is None:
-            buffer = ch
+        wc = _word_count(ch["contenuto"])
+        if not buf_parts:
+            buf_parts = [ch["contenuto"]]
+            buf_heading = ch["heading"]
+            buf_words = wc
             continue
-        if _word_count(buffer["contenuto"]) < min_chunk_words:
-            buffer["contenuto"] = buffer["contenuto"] + "\n\n" + ch["contenuto"]
+        if buf_words < min_chunk_words:
+            buf_parts.append(ch["contenuto"])
+            buf_words += wc
         else:
-            merged.append(buffer)
-            buffer = ch
-    if buffer is not None:
-        merged.append(buffer)
+            merged.append({"contenuto": "\n\n".join(buf_parts), "heading": buf_heading})
+            buf_parts = [ch["contenuto"]]
+            buf_heading = ch["heading"]
+            buf_words = wc
+
+    if buf_parts:
+        tail = "\n\n".join(buf_parts)
+        if merged and buf_words < min_chunk_words:
+            # Riassorbi coda orfana nel chunk precedente
+            merged[-1]["contenuto"] = merged[-1]["contenuto"] + "\n\n" + tail
+        else:
+            merged.append({"contenuto": tail, "heading": buf_heading})
 
     # Aggiungi chunk_index
     return [
