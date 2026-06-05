@@ -12,9 +12,9 @@ from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_excep
 import openai
 
 
-EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIM = 1536
-BATCH_SIZE = 100
+BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "100"))
 
 _client: AsyncOpenAI | None = None
 
