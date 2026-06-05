@@ -2,7 +2,7 @@
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["main", "rate_limit"]
+source = ["main", "rate_limit", "embedding_cache", "embeddings"]
 
 [tool.coverage.report]
 fail_under = 80

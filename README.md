@@ -75,6 +75,17 @@ Railway senza VPC peering.
 - Fail-open in caso di errori Redis: un blip di rete non blocca gli upload
 - Risposta 429 con header `Retry-After`
 
+## Cache embedding
+
+Le embedding sono deterministiche per `(modello, testo)`. Il servizio usa lo
+**stesso Upstash** come cache LRU con TTL (default 30 giorni):
+
+- Chiave: `emb:text-embedding-3-small:{sha256(testo)}`
+- Pre-batch: bulk `GET` sui chunk → solo i miss vanno a OpenAI
+- Post-batch: bulk `SET` dei nuovi embedding con TTL
+- Disattivato se Upstash non configurato; fail-open su errori Redis
+- Risparmio reale su documenti con boilerplate ripetuto (intestazioni, clausole standard)
+
 ## Test
 
 ```bash
