@@ -60,3 +60,38 @@ def test_chunk_preserves_heading():
 def test_word_count():
     assert _word_count("una due tre") == 3
     assert _word_count("") == 0
+
+
+def test_merge_tiny_tail_absorbed_into_previous():
+    """Bug fix: l'ultimo chunk piccolo non deve restare orfano ma riassorbirsi nel precedente."""
+    # 3 sezioni: big, big, tiny — la tiny deve finire nel secondo chunk
+    big = "parola " * 200   # 200 parole, sopra min_chunk_words=50
+    tiny = "fine doc"       # 2 parole, sotto min_chunk_words=50
+    md = f"# A\n{big}\n\n# B\n{big}\n\n# C\n{tiny}"
+    chunks = chunk_markdown(md, chunk_size=500, min_chunk_words=50)
+    # Nessun chunk deve avere solo 2 parole
+    for c in chunks:
+        assert _word_count(c["contenuto"]) >= 50, (
+            f"chunk orfano trovato ({_word_count(c['contenuto'])} parole): {c['contenuto']!r}"
+        )
+    # Il contenuto del chunk finale deve contenere "fine doc"
+    assert any("fine doc" in c["contenuto"] for c in chunks)
+
+
+def test_merge_does_not_mutate_input():
+    """Bug fix: il merge non deve mutare i dict originali di raw_chunks."""
+    md = "# A\nuno due tre\n\n# B\nquattro cinque sei"
+    # chunk_markdown è puro: chiamarlo due volte deve dare lo stesso risultato
+    result1 = chunk_markdown(md, chunk_size=500, min_chunk_words=1)
+    result2 = chunk_markdown(md, chunk_size=500, min_chunk_words=1)
+    assert [c["contenuto"] for c in result1] == [c["contenuto"] for c in result2]
+
+
+def test_merge_multiple_tiny_chunks_accumulate():
+    """Più chunk piccoli consecutivi devono accumularsi fino a raggiungere min_chunk_words."""
+    # 5 sezioni da 20 parole ciascuna, min=50: devono unirsi almeno a 3 sezioni per volta
+    section = "parola " * 20
+    md = "\n\n".join(f"# Sez{i}\n{section}" for i in range(5))
+    chunks = chunk_markdown(md, chunk_size=500, min_chunk_words=50)
+    for c in chunks[:-1]:  # l'ultimo potrebbe essere assorbito dal precedente
+        assert _word_count(c["contenuto"]) >= 50

@@ -9,11 +9,13 @@ import asyncio
 import io
 import logging
 import os
+import threading
 import time
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
 
@@ -31,17 +33,19 @@ SUPPORTED_EXTS = {
     ".png", ".jpg", ".jpeg", ".webp",  # OCR via Markitdown
 }
 
-# Limite upload (MB) — proteggi container e timeout Vercel
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))
-
-# Auth opzionale per il microservizio (consigliata in produzione)
 PARSER_SHARED_SECRET = os.getenv("PARSER_SHARED_SECRET")
+
+# Rate limiting: max N richieste/minuto per IP (protezione DoS e costi OpenAI)
+_RATE_LIMIT = int(os.getenv("PARSE_RATE_LIMIT", "10"))
+_RATE_WINDOW = 60  # secondi
+_rate_store: dict = defaultdict(list)
+_rate_lock = threading.Lock()
+
+_FIELD_MAX = 200  # lunghezza massima campi form
 
 app = FastAPI(title="SuperAgente Parser", version="2.0")
 
-# CORS: solo se il microservizio viene chiamato direttamente dal browser.
-# In architettura standard, è Next.js che lo chiama → CORS non serve.
-# Lasciato restrittivo per default.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("ALLOWED_ORIGINS", "").split(",") if os.getenv("ALLOWED_ORIGINS") else [],
@@ -52,6 +56,35 @@ app.add_middleware(
 md_converter = MarkItDown()
 
 
+def _is_rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    cutoff = now - _RATE_WINDOW
+    with _rate_lock:
+        _rate_store[ip] = [t for t in _rate_store[ip] if t > cutoff]
+        if len(_rate_store[ip]) >= _RATE_LIMIT:
+            return True
+        _rate_store[ip].append(now)
+        return False
+
+
+async def _read_limited(file: UploadFile, max_bytes: int) -> bytes:
+    """Legge il file in chunk da 64KB rifiutando se supera max_bytes prima di caricare tutto in RAM."""
+    parts: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File troppo grande: supera {max_bytes // (1024 * 1024)}MB durante la lettura",
+            )
+        parts.append(chunk)
+    return b"".join(parts)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "embedding_dim": EMBEDDING_DIM}
@@ -59,17 +92,35 @@ async def health():
 
 @app.post("/parse")
 async def parse_file(
+    request: Request,
     file: UploadFile = File(...),
     modulo: str = Form(...),
     categoria: str = Form(...),
     documento_id: Optional[str] = Form(None),
     authorization: Optional[str] = Header(None),
 ):
+    # --- Rate limiting ---
+    client_ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Troppe richieste. Riprova tra un minuto.")
+
     # --- Auth opzionale ---
     if PARSER_SHARED_SECRET:
         token = (authorization or "").replace("Bearer ", "")
         if token != PARSER_SHARED_SECRET:
             raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # --- Validazione input form ---
+    if not modulo or not modulo.strip():
+        raise HTTPException(status_code=400, detail="modulo non può essere vuoto")
+    if len(modulo) > _FIELD_MAX:
+        raise HTTPException(status_code=400, detail=f"modulo: max {_FIELD_MAX} caratteri")
+    if not categoria or not categoria.strip():
+        raise HTTPException(status_code=400, detail="categoria non può essere vuota")
+    if len(categoria) > _FIELD_MAX:
+        raise HTTPException(status_code=400, detail=f"categoria: max {_FIELD_MAX} caratteri")
+    if documento_id is not None and len(documento_id) > _FIELD_MAX:
+        raise HTTPException(status_code=400, detail=f"documento_id: max {_FIELD_MAX} caratteri")
 
     # --- Validazione estensione ---
     ext = Path(file.filename or "").suffix.lower()
@@ -79,14 +130,15 @@ async def parse_file(
             detail=f"Estensione '{ext}' non supportata. Supportate: {sorted(SUPPORTED_EXTS)}",
         )
 
-    # --- Lettura con limite dimensione ---
-    contents = await file.read()
+    # --- Lettura con limite pre-RAM ---
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    # Fast-reject tramite Content-Length se presente (il valore include headers multipart,
+    # quindi è una stima superiore: sicuro usarlo solo per rigetto rapido)
+    cl = request.headers.get("content-length")
+    if cl and int(cl) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File troppo grande (max {MAX_UPLOAD_MB}MB)")
+    contents = await _read_limited(file, max_bytes)
     size_mb = len(contents) / (1024 * 1024)
-    if size_mb > MAX_UPLOAD_MB:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File troppo grande: {size_mb:.1f}MB (max {MAX_UPLOAD_MB}MB)",
-        )
 
     log.info(f"Parsing {file.filename} ({size_mb:.2f}MB, modulo={modulo})")
 
