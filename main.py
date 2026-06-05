@@ -11,12 +11,13 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, UploadFile, File, Form, HTTPException
+from fastapi import Depends, FastAPI, Header, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
 
 from chunker import chunk_markdown
 from embeddings import generate_embeddings_batch, EMBEDDING_DIM
+from rate_limit import check_rate_limit
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -56,7 +57,7 @@ async def health():
     return {"status": "ok", "embedding_dim": EMBEDDING_DIM}
 
 
-@app.post("/parse")
+@app.post("/parse", dependencies=[Depends(check_rate_limit)])
 async def parse_file(
     file: UploadFile = File(...),
     modulo: str = Form(...),

@@ -59,8 +59,21 @@ curl -X POST http://localhost:8000/parse \
    - `OPENAI_API_KEY`
    - `PARSER_SHARED_SECRET` (genera con `openssl rand -hex 32`)
    - `MAX_UPLOAD_MB=10`
+   - (opz.) `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` per rate limiting distribuito
+   - (opz.) `RATE_LIMIT_PER_MIN=10`
 4. `railway up`
 5. Copia l'URL pubblico → mettilo in `PYTHON_PARSER_URL` lato Next.js
+
+## Rate limiting
+
+Con più repliche, il rate limiter in-process non è coerente. Questo servizio usa
+**Upstash Redis** via REST API (chiave per IP, finestra fissa 60s). Funziona da
+Railway senza VPC peering.
+
+- Imposta `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` per attivarlo
+- Senza queste variabili è disattivato (no-op) — ok per dev locale
+- Fail-open in caso di errori Redis: un blip di rete non blocca gli upload
+- Risposta 429 con header `Retry-After`
 
 ## Test
 

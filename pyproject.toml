@@ -2,7 +2,7 @@
 asyncio_mode = "auto"
 
 [tool.coverage.run]
-source = ["main"]
+source = ["main", "rate_limit"]
 
 [tool.coverage.report]
 fail_under = 80
