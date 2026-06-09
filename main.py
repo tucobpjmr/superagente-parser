@@ -22,8 +22,9 @@ from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Requ
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
 
-from chunker import chunk_markdown
+from chunker import chunk_markdown, build_contextual_text
 from embeddings import generate_embeddings_batch, EMBEDDING_DIM, get_client
+from enrichment import generate_document_summary
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,12 @@ MAX_UPLOAD_MB   = int(os.getenv("MAX_UPLOAD_MB", "10"))
 CHUNK_SIZE      = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP   = int(os.getenv("CHUNK_OVERLAP", "50"))
 OCR_TIMEOUT     = float(os.getenv("OCR_TIMEOUT", "60"))
+
+# Contextual retrieval: arricchisce l'INPUT dell'embedding con titolo, riassunto
+# e breadcrumb di sezione. Il testo salvato resta pulito. Disattivabile per
+# tornare al comportamento pre-Fase-1 (embedding del solo contenuto del chunk).
+CONTEXTUAL_EMBEDDING = os.getenv("CONTEXTUAL_EMBEDDING", "true").lower() in ("1", "true", "yes", "on")
+SUMMARY_TIMEOUT = float(os.getenv("SUMMARY_TIMEOUT", "15"))
 
 PARSER_SHARED_SECRET = os.getenv("PARSER_SHARED_SECRET")
 
@@ -169,6 +176,22 @@ def _is_rate_limited(ip: str) -> bool:
         return True
     _rate_store[ip].append(now)
     return False
+
+
+async def _safe_document_summary(markdown_text: str) -> Optional[str]:
+    """
+    Genera il riassunto del documento senza mai far fallire l'ingestion:
+    timeout stretto + cattura di ogni errore (es. OPENAI_API_KEY assente,
+    rate limit). In caso di problema ritorna None e il contesto degrada al
+    solo titolo + breadcrumb.
+    """
+    try:
+        return await asyncio.wait_for(
+            generate_document_summary(markdown_text), timeout=SUMMARY_TIMEOUT
+        )
+    except Exception as e:
+        log.warning("summary_failed", extra={"error": str(e)})
+        return None
 
 
 async def _read_limited(file: UploadFile, max_bytes: int) -> bytes:
@@ -322,10 +345,25 @@ async def parse_file(
         raise HTTPException(status_code=422, detail="Nessun chunk generato")
     log.info("chunking_done", extra={"n_chunks": len(chunks), "duration_s": round(time.monotonic() - t1, 3)})
 
+    # --- 2b. Riassunto documento (contextual retrieval) ---
+    riassunto = None
+    if CONTEXTUAL_EMBEDDING:
+        ts = time.monotonic()
+        riassunto = await _safe_document_summary(markdown_text)
+        log.info("summary_done", extra={"has_summary": riassunto is not None, "duration_s": round(time.monotonic() - ts, 3)})
+
     # --- 3. Embedding batch ---
+    # L'input dell'embedding è arricchito col contesto (titolo + riassunto +
+    # breadcrumb di sezione); il testo salvato in `contenuto` resta pulito.
     t2 = time.monotonic()
     try:
-        texts = [c["contenuto"] for c in chunks]
+        if CONTEXTUAL_EMBEDDING:
+            texts = [
+                build_contextual_text(c["contenuto"], c["heading_path"], safe_filename, riassunto)
+                for c in chunks
+            ]
+        else:
+            texts = [c["contenuto"] for c in chunks]
         embeddings = await generate_embeddings_batch(texts)
     except Exception as e:
         log.exception("Embedding error")
@@ -339,6 +377,7 @@ async def parse_file(
             "contenuto": c["contenuto"],
             "embedding": emb,
             "heading": c["heading"],
+            "heading_path": c["heading_path"],
             "modulo": modulo,
             # Schema multidisciplinare: il modulo del form è la prima disciplina;
             # la classificazione LLM (Fase 1) potrà aggiungerne altre.
@@ -358,6 +397,7 @@ async def parse_file(
             "modulo": modulo,
             "categoria": categoria,
             "n_chunks": len(chunks),
+            "riassunto_documento": riassunto,
             "embedding_model": "text-embedding-3-small",
             "embedding_dim": EMBEDDING_DIM,
         },

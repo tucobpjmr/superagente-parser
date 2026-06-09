@@ -30,6 +30,22 @@ Microservizio FastAPI per estrarre testo da documenti (PDF, DOCX, XLSX, PPTX, HT
 }
 ```
 
+Ogni chunk include anche `heading_path` (gerarchia completa H1 > H2 > H3) e i
+metadata espongono `riassunto_documento`.
+
+### Contextual retrieval
+
+Prima dell'embedding, a ogni chunk viene anteposta una riga di contesto
+(titolo del documento + riassunto di una frase generato via LLM + breadcrumb di
+sezione): `[Doc: <file> — <riassunto> — Sezione: <H1 > H2>]`. Migliora il
+retrieval cross-dominio perché un chunk isolato porta con sé il tema e la
+collocazione del documento. **Il testo salvato in `contenuto` resta pulito**:
+solo l'input dell'embedding è arricchito.
+
+Disattivabile con `CONTEXTUAL_EMBEDDING=false` (torna all'embedding del solo
+contenuto del chunk) o `ENRICHMENT_ENABLED=false` (salta la sola chiamata LLM
+del riassunto, mantenendo titolo + sezione).
+
 ### `GET /health`
 Healthcheck per Railway.
 
