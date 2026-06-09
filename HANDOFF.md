@@ -1,144 +1,227 @@
 # Handoff — SuperAgente Parser
 
-> Stato al 2026-06-05 · branch `claude/priority-1-resolution-VMFeX` · PR #3 (draft)
+> Stato al 2026-06-09 · branch `claude/super-agent-strategy-ylp0fd` · PR #6 (draft)
 
 ---
 
 ## 1. Panoramica del progetto
 
-Microservizio Python/FastAPI deployato su **Railway** che:
-1. Riceve un documento (PDF, DOCX, XLSX, PPTX, HTML, immagini) via `POST /parse`
-2. Estrae testo con **Markitdown** (OCR automatico via Tesseract)
-3. Spezza il testo in **chunk** per heading + word-count
-4. Genera **embedding** con OpenAI `text-embedding-3-small`
-5. Restituisce chunk + embedding pronti per INSERT in **Supabase pgvector**
-
-Il chiamante principale è la route Next.js `app/api/parse-file/route.ts` (già scaffoldata in PR #1).
+Microservizio Python/FastAPI deployato su **Railway** che costituisce il
+backend di ingestion e retrieval del super agente. Il flusso principale:
 
 ```
-Browser → Next.js API route → [PARSER_SHARED_SECRET] → POST /parse → OpenAI Embeddings
-                                                                     ↓
-                                                              Supabase document_chunks
+Browser → Next.js API route → [PARSER_SHARED_SECRET] → POST /parse
+                                                              │
+                          Markitdown (OCR) → chunking → arricchimento LLM
+                                                              │
+                                          discipline[] + tags + entities
+                                                              │
+                                              embedding OpenAI (contestuale)
+                                                              │
+                                          Supabase: documenti, document_chunks
+                                                              │
+                                     (Fase 2, non ancora implementato)
+                                          POST /search → match_chunks RRF
 ```
+
+### Progetto Supabase attivo
+
+| Progetto | ID | Stato |
+|----------|----|-------|
+| `super-agente-viaggi` | `pxtwdhhulobyrheioiex` | ACTIVE_HEALTHY |
+| `tullio` | `vmxvnxsqfisucugcpqlc` | ACTIVE_HEALTHY (gestionale) |
+
+Lo schema RAG vive su **`super-agente-viaggi`** (ripristinato da pausa il 2026-06-09).
 
 ---
 
-## 2. Cosa è stato fatto in questa sessione
-
-### PR #3 — `claude/priority-1-resolution-VMFeX` (branch corrente)
-
-5 commit in ordine cronologico:
-
-| Commit | Tag | Contenuto |
-|--------|-----|-----------|
-| `72ad06a` | fix | **Auth header critico**: `authorization: Optional[str] = None` → `Header(None)`. FastAPI non iniettava mai l'HTTP header → con `PARSER_SHARED_SECRET` impostato ogni richiesta era sempre 401. |
-| `72ad06a` | perf | **OCR non-bloccante**: `run_in_executor` + `wait_for(OCR_TIMEOUT)`. **Embedding parallelo**: `asyncio.gather` sui batch (da ~3s a ~1s con 300 chunk). |
-| `9a8952e` | security | **Pre-RAM size check**: `_read_limited()` legge in chunk da 64 KB, rifiuta prima di caricare tutto in RAM. **Validazione form**: modulo/categoria non-vuoti, max 200 char. **Rate limiting**: sliding window per IP → 429. **Bug chunker**: coda orfana, O(n²) concatenation, mutazione input. |
-| `54cc11d` | robustness | **sanitize_filename**: strip path POSIX/Windows, Unicode NFKC, char di controllo, troncamento con estensione preservata. **MIME check**: verifica coerenza content-type / estensione. **CORS fix**: parsing robusto ALLOWED_ORIGINS, OPTIONS, allow_headers ristretto. **`/ready`** endpoint per readiness probe. |
-| `ac88c44` | quality | **Log strutturato JSON** (`_JsonFormatter`, `LOG_FORMAT` env). **Config hardcoded → env vars** (`CHUNK_SIZE`, `CHUNK_OVERLAP`, `OCR_TIMEOUT`, `PARSE_RATE_WINDOW`, `EMBEDDING_MODEL`, `EMBEDDING_BATCH_SIZE`). **threading.Lock rimosso** (asyncio è single-threaded per processo). **40 test** (test_api.py, test_chunker.py, test_filename.py). |
-
-### PR aperte in parallelo
-
-| PR | Branch | Stato | Contenuto |
-|----|--------|-------|-----------|
-| **#1** | `claude/exciting-tesla-vqJIP` | draft | Route Next.js `app/api/parse-file/route.ts` per Fase 3 RAG |
-| **#2** | `claude/travel-agent-architecture-gFUUz` | draft | Ottimizzazioni PERF già incorporate nel branch corrente |
-| **#3** | `claude/priority-1-resolution-VMFeX` | **draft** | Tutti i fix P1/P2/P3 — da mergere su `main` |
-
-> **Azione richiesta**: fare review e merge di PR #3 → poi valutare se PR #1 è ancora necessaria (il codice Next.js va nel repo Next.js, non qui).
-
----
-
-## 3. Stato attuale del codice
-
-### File principali
+## 2. Struttura del repo
 
 ```
-main.py          — FastAPI app, tutti gli endpoint, helpers
-chunker.py       — Chunking markdown (heading + word-count + merge)
-embeddings.py    — Client OpenAI, batch parallelo, retry tenacity
-requirements.txt — 7 dipendenze (rimosso python-dotenv inutile)
-Dockerfile       — Python 3.11-slim + Tesseract ITA/ENG + Poppler
-railway.toml     — Railway build/deploy config
+main.py              — FastAPI app, endpoint /parse /health /ready, helpers
+chunker.py           — Chunking markdown (heading path gerarchico + word-count)
+embeddings.py        — Client OpenAI, batch parallelo, retry tenacity
+enrichment.py        — Riassunto documento + classificazione multi-disciplina + entità
+requirements.txt     — 7 dipendenze (markitdown 0.1.6)
+Dockerfile           — Python 3.11-slim + Tesseract ITA/ENG + Poppler
+railway.toml         — healthcheckPath = "/ready"
+supabase/migrations/
+  20260609000000_rag_schema.sql      — tabelle documenti/document_chunks, indici HNSW+GIN
+  20260609000001_match_chunks.sql    — funzione match_chunks (RRF ibrido)
+  20260609000002_relax_legacy_checks.sql — rimozione CHECK troppo rigidi
 tests/
-  test_api.py       — 23 test di integrazione endpoint
-  test_chunker.py   — 9 test per chunker
-  test_filename.py  — 8 test per sanitize_filename
+  test_api.py        — 33 test di integrazione endpoint
+  test_chunker.py    — 16 test (chunker + contextual text)
+  test_enrichment.py — 11 test (classificazione + entità)
+  test_filename.py   — 8 test
+PIANO-SVILUPPO-MULTIDISCIPLINARE.md — piano originale (su branch PR #5, solo doc)
 ```
 
-### Variabili d'ambiente
+**Suite corrente: 60 passed** (zero fallimenti).
 
-| Variabile | Default | Obbligatoria |
-|-----------|---------|:---:|
-| `OPENAI_API_KEY` | — | ✓ |
-| `PARSER_SHARED_SECRET` | — | consigliata |
-| `MAX_UPLOAD_MB` | `10` | |
-| `PARSE_RATE_LIMIT` | `10` | |
-| `PARSE_RATE_WINDOW` | `60` | |
-| `CHUNK_SIZE` | `500` | |
-| `CHUNK_OVERLAP` | `50` | |
-| `OCR_TIMEOUT` | `60` | |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | |
-| `EMBEDDING_BATCH_SIZE` | `100` | |
-| `ALLOWED_ORIGINS` | `` (CORS disabilitato) | |
-| `LOG_FORMAT` | `json` | |
+---
 
-### Endpoint
+## 3. Fasi completate
+
+### Fase 0 — Fondamenta Supabase ✅
+
+Migrazioni **applicate e verificate** su `super-agente-viaggi`:
+
+| Oggetto | Dettaglio |
+|---------|-----------|
+| `documenti` | UUID, nome_file, discipline text[], riassunto, content_hash, n_chunks |
+| `document_chunks` | UUID, embedding vector(1536), fts tsvector (italian), discipline text[], tags text[], entities jsonb, heading text, heading_path text |
+| Indice HNSW | `document_chunks_embedding_idx` (cosine) |
+| Indice GIN | `document_chunks_fts_idx`, `document_chunks_discipline_idx`, `documenti_discipline_idx` |
+| `match_chunks()` | Ricerca ibrida: densa + full-text (BM25), fusione RRF, boost ×1.5 per disciplina (mai filtro rigido) |
+
+I CHECK legacy `documenti_categoria_check` e `documenti_tipo_file_check`
+(troppo restrittivi) sono stati rimossi.
+
+### Fase 1.3 — Chunking contestuale ✅
+
+- `chunk_markdown()` traccia la **gerarchia heading completa** (heading_path:
+  `H1 > H2 > H3`) con stack di antenati.
+- `build_contextual_text()`: antepone
+  `[Doc: <titolo> — <riassunto> — Sezione: <heading_path>]` all'**input
+  dell'embedding**. Il testo salvato in `contenuto` resta pulito.
+- `generate_document_summary()`: 1 chiamata LLM per documento (gpt-4o-mini),
+  gated da `ENRICHMENT_ENABLED`.
+- `_safe_document_summary()` in `main.py`: timeout 15 s + cattura totale.
+
+### Fase 1.1/1.2 — Classificazione multi-disciplina + entità ✅
+
+- `classify_chunks()`: batch paralleli, ogni batch = 1 chiamata LLM.
+- Risposta JSON validata in `_parse_classification()`: filtro tassonomia,
+  dedup, cap 8 tag, `entities` normalizzate.
+- Tassonomia built-in di 12 discipline (csv env `DISCIPLINE_TAXONOMY`).
+- Classificazione eseguita **in parallelo all'embedding** via `asyncio.ensure_future`.
+- Degradazione a 3 livelli: JSON malformato → neutro; batch fallito → neutro
+  per il batch; timeout/errore globale → `discipline=[modulo]`.
+- `/parse` output per chunk: `discipline` (modulo sempre primo), `tags`,
+  `entities`, `heading_path`.
+
+---
+
+## 4. Endpoint attuali
 
 | Metodo | Path | Uso |
 |--------|------|-----|
-| `GET` | `/health` | Liveness probe (Railway HEALTHCHECK) — <100 ms, no I/O |
-| `GET` | `/ready` | Readiness probe — verifica OPENAI_API_KEY e markitdown |
-| `POST` | `/parse` | Parsing + embedding — form-data: `file`, `modulo`, `categoria`, `documento_id?` |
+| `GET` | `/health` | Liveness probe (<100 ms) |
+| `GET` | `/ready` | Readiness: verifica OPENAI_API_KEY + markitdown |
+| `POST` | `/parse` | Parsing + embedding + arricchimento LLM |
 
----
+### Risposta `/parse` (schema attuale)
 
-## 4. Come eseguire i test
-
-```bash
-pip install -r requirements.txt pytest
-pytest tests/ -v
-# Expected: 40 passed
+```json
+{
+  "markdown": "...",
+  "chunks": [
+    {
+      "chunk_index": 0,
+      "contenuto": "testo pulito...",
+      "embedding": [0.012, ...],
+      "heading": "Sezione",
+      "heading_path": "Capitolo > Sezione",
+      "modulo": "viaggi",
+      "discipline": ["viaggi", "fiscalita", "contrattualistica"],
+      "tags": ["penale annullamento", "iva"],
+      "entities": {
+        "riferimenti_normativi": ["Dlgs 62/2024"],
+        "importi": ["250 EUR"]
+      },
+      "categoria": "normativa",
+      "documento_id": "uuid-..."
+    }
+  ],
+  "metadata": {
+    "file": "contratto.pdf",
+    "size_mb": 0.45,
+    "modulo": "viaggi",
+    "categoria": "normativa",
+    "n_chunks": 12,
+    "riassunto_documento": "Condizioni generali di vendita pacchetti turistici.",
+    "embedding_model": "text-embedding-3-small",
+    "embedding_dim": 1536
+  }
+}
 ```
 
-Il file `.env.example` è **mancante** (TODO nella roadmap).  
-Per i test non serve OPENAI_API_KEY: le chiamate OpenAI sono mockate.
+---
+
+## 5. Variabili d'ambiente
+
+| Variabile | Default | Obbligatoria | Fase |
+|-----------|---------|:---:|------|
+| `OPENAI_API_KEY` | — | ✓ | — |
+| `PARSER_SHARED_SECRET` | — | consigliata | — |
+| `MAX_UPLOAD_MB` | `10` | | — |
+| `PARSE_RATE_LIMIT` | `10` | | — |
+| `PARSE_RATE_WINDOW` | `60` | | — |
+| `CHUNK_SIZE` | `500` | | — |
+| `CHUNK_OVERLAP` | `50` | | — |
+| `OCR_TIMEOUT` | `60` | | — |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | | — |
+| `EMBEDDING_BATCH_SIZE` | `100` | | — |
+| `ALLOWED_ORIGINS` | `` | | — |
+| `LOG_FORMAT` | `json` | | — |
+| `CONTEXTUAL_EMBEDDING` | `true` | | 1.3 |
+| `SUMMARY_TIMEOUT` | `15` | | 1.3 |
+| `ENRICHMENT_ENABLED` | `true` | | 1 |
+| `ENRICHMENT_MODEL` | `gpt-4o-mini` | | 1 |
+| `SUMMARY_MAX_INPUT_CHARS` | `12000` | | 1.3 |
+| `DISCIPLINE_TAXONOMY` | built-in | | 1.1 |
+| `ENRICHMENT_BATCH_SIZE` | `16` | | 1.1 |
+| `ENRICHMENT_CHUNK_CHARS` | `2000` | | 1.1 |
+| `CLASSIFY_TIMEOUT` | `45` | | 1.1 |
+| `SUPABASE_URL` | — | ✓ (Fase 2) | 2 |
+| `SUPABASE_SERVICE_KEY` | — | ✓ (Fase 2) | 2 |
 
 ---
 
-## 5. Roadmap
+## 6. PR aperte
 
-### Fase immediatamente successiva
+| PR | Branch | Stato | Contenuto |
+|----|--------|-------|-----------|
+| **#6** | `claude/super-agent-strategy-ylp0fd` | **draft** | Fase 0 + Fase 1 completa |
+| **#5** | `claude/multidisciplinary-tool-planning-ddtx6m` | draft | Solo documento di piano (da chiudere) |
+| **#4** | `claude/confident-fermat-bXn8f` | draft | `.env.example` — **superseduta dalla PR #6**, da chiudere |
 
-- [ ] **Merge PR #3** su `main` dopo review
-- [ ] **Creare `.env.example`** con tutte le variabili documentate (il README la referenzia ma il file non esiste)
-- [ ] **Chiudere PR #2** (le ottimizzazioni PERF sono già in PR #3; PR #2 è obsoleta)
-- [ ] **PR #1** — Spostare `nextjs-reference/` nel repo Next.js; chiudere questa PR o convertirla in nota
+---
 
-### Qualità e osservabilità
+## 7. Avviso sicurezza Supabase (azione utente richiesta)
 
-- [ ] **pytest coverage**: aggiungere `pytest-cov`; target > 80% su `main.py`
-- [ ] **`.env.example`**: documentare tutte le env var con commenti
-- [ ] **`railway.toml`**: aggiornare `healthcheckPath` da `/health` a `/ready` per readiness corretta
-- [ ] **Secrets scanning**: aggiungere `gitleaks` o GitHub secret scanning al CI
-- [ ] **Aggiornamento dipendenze**: `markitdown[all]==0.1.1` è datata (verificare versione corrente)
+L'advisor Supabase segnala che **6 tabelle** di `super-agente-viaggi` hanno
+**RLS disabilitata**: `istruzioni_agente`, `fonti_online`, `documenti`,
+`conversazioni`, `dati_climatici`, `requisiti_visti`.
 
-### Scalabilità e produzione
+Non è stato applicato automaticamente perché abilitare RLS senza policy blocca
+l'accesso da anon key. Quando vuoi risolvere:
 
-- [ ] **Rate limiting distribuito**: l'implementazione attuale è per-processo (in-memory). Con più worker/replica su Railway, il rate limit non è condiviso. Fix: Redis (upstash è gratuito su Railway) o sticky-session per IP.
-- [ ] **Streaming response**: per documenti grandi (>1000 chunk), la risposta JSON può essere > 10 MB. Valutare `StreamingResponse` o paginazione.
-- [ ] **Job asincrono / worker**: per documenti molto grandi, spostare il parsing su una coda (Railway workers, BullMQ, o Supabase Edge Functions con queue). L'endpoint `/parse` restituirebbe un `job_id` e il cliente farebbe polling.
-- [ ] **Caching embedding**: documenti identici producono gli stessi embedding. Un hash SHA-256 del contenuto + lookup in Supabase eviterebbe chiamate OpenAI duplicate.
+```sql
+-- Esegui DOPO aver definito le policy adeguate per ogni tabella.
+ALTER TABLE public.istruzioni_agente ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.fonti_online ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.documenti ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversazioni ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dati_climatici ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.requisiti_visti ENABLE ROW LEVEL SECURITY;
+```
 
-### Testing
+---
 
-- [ ] **Test E2E**: aggiungere un test che usa un vero file PDF piccolo (fixture in `tests/fixtures/`) per validare l'intera pipeline OCR → chunk → embedding mock.
-- [ ] **Load test**: verificare il comportamento del rate limiter con `locust` o `k6`.
-- [ ] **Mutational testing**: valutare `mutmut` per verificare la qualità dei test del chunker.
+## 8. Come eseguire i test
 
-### Sicurezza (post-hardening)
+```bash
+pip install -r requirements.txt pytest anyio pytest-anyio
+pytest tests/ -v
+# Expected: 60 passed
+```
 
-- [ ] **Aggiungere `X-Request-ID`** header per correlazione log tra Next.js e parser
-- [ ] **Audit log**: loggare modulo/categoria/documento_id di ogni parse con l'IP (già nel log strutturato, ma verificare che sia inviato a un sistema di audit)
-- [ ] **Verifica contenuto file**: Markitdown accetta qualsiasi file con estensione supportata. Valutare deep content inspection (es. verifica magic bytes PDF) per prevenire file crafted malevoli.
-- [ ] **Dependency pinning**: usare `pip-compile` (`pip-tools`) per generare un `requirements.lock` deterministico con hash verificati.
+Le chiamate OpenAI e LLM sono tutte mockate: non serve `OPENAI_API_KEY`.
+
+---
+
+## 9. Roadmap — prossime fasi
+
+Vedi `ROADMAP.md` per il dettaglio completo.
