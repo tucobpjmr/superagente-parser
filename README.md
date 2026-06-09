@@ -46,6 +46,24 @@ Disattivabile con `CONTEXTUAL_EMBEDDING=false` (torna all'embedding del solo
 contenuto del chunk) o `ENRICHMENT_ENABLED=false` (salta la sola chiamata LLM
 del riassunto, mantenendo titolo + sezione).
 
+### Classificazione multi-disciplina ed entità
+
+Ogni chunk viene classificato via LLM (batch paralleli, stesso modello
+economico del riassunto) con:
+
+- `discipline`: discipline pertinenti scelte da una **tassonomia chiusa**
+  (configurabile con `DISCIPLINE_TAXONOMY`, CSV). Il `modulo` del form resta
+  sempre la **prima** disciplina; la classificazione aggiunge le altre.
+- `tags`: parole chiave libere (max 8, minuscole).
+- `entities`: entità "ponte" tra discipline — riferimenti normativi, importi,
+  date, organismi (`jsonb` su Supabase). Due chunk di moduli diversi che
+  citano la stessa norma diventano collegabili in query.
+
+La classificazione gira **in parallelo all'embedding** (niente latenza extra
+nel caso tipico) e degrada senza bloccare l'ingestion: in caso di errore o
+timeout (`CLASSIFY_TIMEOUT`) i chunk escono con `discipline=[modulo]`,
+`tags=[]`, `entities=null`. Disattivabile con `ENRICHMENT_ENABLED=false`.
+
 ### `GET /health`
 Healthcheck per Railway.
 

@@ -24,7 +24,7 @@ from markitdown import MarkItDown
 
 from chunker import chunk_markdown, build_contextual_text
 from embeddings import generate_embeddings_batch, EMBEDDING_DIM, get_client
-from enrichment import generate_document_summary
+from enrichment import generate_document_summary, classify_chunks, empty_enrichment
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +84,10 @@ OCR_TIMEOUT     = float(os.getenv("OCR_TIMEOUT", "60"))
 # tornare al comportamento pre-Fase-1 (embedding del solo contenuto del chunk).
 CONTEXTUAL_EMBEDDING = os.getenv("CONTEXTUAL_EMBEDDING", "true").lower() in ("1", "true", "yes", "on")
 SUMMARY_TIMEOUT = float(os.getenv("SUMMARY_TIMEOUT", "15"))
+
+# Timeout complessivo per la classificazione multi-disciplina (i batch girano
+# in parallelo, quindi copre ~1 round-trip LLM più i retry).
+CLASSIFY_TIMEOUT = float(os.getenv("CLASSIFY_TIMEOUT", "45"))
 
 PARSER_SHARED_SECRET = os.getenv("PARSER_SHARED_SECRET")
 
@@ -192,6 +196,19 @@ async def _safe_document_summary(markdown_text: str) -> Optional[str]:
     except Exception as e:
         log.warning("summary_failed", extra={"error": str(e)})
         return None
+
+
+async def _safe_classify_chunks(texts: List[str], hint: str) -> List[dict]:
+    """
+    Classificazione multi-disciplina che non fa mai fallire l'ingestion:
+    in caso di timeout o errore ogni chunk degrada al risultato neutro
+    (il chiamante vi unisce il modulo legacy come unica disciplina).
+    """
+    try:
+        return await asyncio.wait_for(classify_chunks(texts, hint), timeout=CLASSIFY_TIMEOUT)
+    except Exception as e:
+        log.warning("classify_failed", extra={"error": str(e), "n_chunks": len(texts)})
+        return [empty_enrichment() for _ in texts]
 
 
 async def _read_limited(file: UploadFile, max_bytes: int) -> bytes:
@@ -352,25 +369,36 @@ async def parse_file(
         riassunto = await _safe_document_summary(markdown_text)
         log.info("summary_done", extra={"has_summary": riassunto is not None, "duration_s": round(time.monotonic() - ts, 3)})
 
-    # --- 3. Embedding batch ---
+    # --- 3. Embedding + classificazione multi-disciplina in parallelo ---
     # L'input dell'embedding è arricchito col contesto (titolo + riassunto +
     # breadcrumb di sezione); il testo salvato in `contenuto` resta pulito.
+    # La classificazione lavora sul testo pulito e gira in parallelo: nel caso
+    # tipico non aggiunge latenza rispetto al solo embedding.
     t2 = time.monotonic()
+    if CONTEXTUAL_EMBEDDING:
+        texts = [
+            build_contextual_text(c["contenuto"], c["heading_path"], safe_filename, riassunto)
+            for c in chunks
+        ]
+    else:
+        texts = [c["contenuto"] for c in chunks]
+
+    classify_task = asyncio.ensure_future(
+        _safe_classify_chunks([c["contenuto"] for c in chunks], modulo)
+    )
     try:
-        if CONTEXTUAL_EMBEDDING:
-            texts = [
-                build_contextual_text(c["contenuto"], c["heading_path"], safe_filename, riassunto)
-                for c in chunks
-            ]
-        else:
-            texts = [c["contenuto"] for c in chunks]
         embeddings = await generate_embeddings_batch(texts)
     except Exception as e:
+        classify_task.cancel()
         log.exception("Embedding error")
         raise HTTPException(status_code=502, detail=f"Errore OpenAI: {e}")
+    enrichments = await classify_task
     log.info("embedding_done", extra={"n_texts": len(texts), "duration_s": round(time.monotonic() - t2, 3)})
 
     # --- 4. Costruisci risposta pronta per INSERT su Supabase ---
+    # Schema multidisciplinare: il modulo del form resta la prima disciplina
+    # (retrocompatibilità); la classificazione LLM aggiunge le altre.
+    modulo_norm = modulo.strip().lower()
     chunks_out = [
         {
             "chunk_index": c["chunk_index"],
@@ -379,13 +407,13 @@ async def parse_file(
             "heading": c["heading"],
             "heading_path": c["heading_path"],
             "modulo": modulo,
-            # Schema multidisciplinare: il modulo del form è la prima disciplina;
-            # la classificazione LLM (Fase 1) potrà aggiungerne altre.
-            "discipline": [modulo],
+            "discipline": [modulo] + [d for d in enr["discipline"] if d != modulo_norm],
+            "tags": enr["tags"],
+            "entities": enr["entities"],
             "categoria": categoria,
             "documento_id": documento_id,
         }
-        for c, emb in zip(chunks, embeddings)
+        for c, emb, enr in zip(chunks, embeddings, enrichments)
     ]
 
     return {

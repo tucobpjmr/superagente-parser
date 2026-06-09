@@ -58,6 +58,14 @@ def _mock_summary(text="Riassunto di test."):
     return patch("main.generate_document_summary", side_effect=_fake)
 
 
+def _mock_classify(result=None):
+    """Mocka classify_chunks; result è il dict applicato a ogni chunk."""
+    enr = result or {"discipline": [], "tags": [], "entities": None}
+    async def _fake(texts, hint=None):
+        return [dict(enr) for _ in texts]
+    return patch("main.classify_chunks", side_effect=_fake)
+
+
 # ── /health ─────────────────────────────────────────────────────────────────
 
 def test_health_returns_ok():
@@ -270,6 +278,59 @@ def test_parse_summary_failure_degrades_gracefully():
 
     assert resp.status_code == 200
     assert resp.json()["metadata"]["riassunto_documento"] is None
+
+
+# ── Classificazione multi-disciplina (Fase 1.1/1.2) ──────────────────────────
+
+def test_parse_merges_classified_disciplines_with_modulo_first():
+    enr = {
+        "discipline": ["assicurazioni", "fiscalita"],
+        "tags": ["annullamento"],
+        "entities": {"riferimenti_normativi": ["Dlgs 62/2024"]},
+    }
+    with _mock_ocr(), _mock_embeddings(), _mock_summary(), _mock_classify(enr):
+        resp = _upload(modulo="fiscalita")
+    assert resp.status_code == 200
+    chunk = resp.json()["chunks"][0]
+    # modulo sempre primo, niente duplicati
+    assert chunk["discipline"] == ["fiscalita", "assicurazioni"]
+    assert chunk["tags"] == ["annullamento"]
+    assert chunk["entities"] == {"riferimenti_normativi": ["Dlgs 62/2024"]}
+
+
+def test_parse_classification_failure_falls_back_to_modulo():
+    """Se la classificazione fallisce, discipline=[modulo], tags=[], entities=None."""
+    async def _boom(texts, hint=None):
+        raise RuntimeError("LLM giù")
+
+    with _mock_ocr(), _mock_embeddings(), _mock_summary(), \
+         patch("main.classify_chunks", side_effect=_boom):
+        resp = _upload(modulo="contratti")
+
+    assert resp.status_code == 200
+    chunk = resp.json()["chunks"][0]
+    assert chunk["discipline"] == ["contratti"]
+    assert chunk["tags"] == []
+    assert chunk["entities"] is None
+
+
+def test_parse_classifier_receives_clean_text():
+    """Il classificatore deve ricevere il contenuto pulito, non quello
+    contestualizzato per l'embedding."""
+    captured = {}
+
+    async def _capture(texts, hint=None):
+        captured["texts"] = texts
+        captured["hint"] = hint
+        return [{"discipline": [], "tags": [], "entities": None} for _ in texts]
+
+    with _mock_ocr("# Cap\n" + "parola " * 80), _mock_embeddings(), \
+         _mock_summary(), patch("main.classify_chunks", side_effect=_capture):
+        resp = _upload(modulo="trasporti")
+
+    assert resp.status_code == 200
+    assert captured["hint"] == "trasporti"
+    assert all(not t.startswith("[Doc:") for t in captured["texts"])
 
 
 def test_parse_empty_ocr_result_returns_422():
