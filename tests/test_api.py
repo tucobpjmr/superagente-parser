@@ -226,6 +226,7 @@ def test_parse_success_full_response():
     assert chunks[0]["chunk_index"] == 0
     assert len(chunks[0]["embedding"]) == 1536
     assert chunks[0]["modulo"] == "contratti"
+    assert chunks[0]["discipline"] == ["contratti"]
     assert chunks[0]["documento_id"] == "doc-123"
 
 

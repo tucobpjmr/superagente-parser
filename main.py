@@ -340,6 +340,9 @@ async def parse_file(
             "embedding": emb,
             "heading": c["heading"],
             "modulo": modulo,
+            # Schema multidisciplinare: il modulo del form è la prima disciplina;
+            # la classificazione LLM (Fase 1) potrà aggiungerne altre.
+            "discipline": [modulo],
             "categoria": categoria,
             "documento_id": documento_id,
         }
