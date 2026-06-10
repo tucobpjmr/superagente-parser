@@ -52,6 +52,20 @@ def _mock_embeddings(dim=1536):
     return patch("main.generate_embeddings_batch", side_effect=_fake)
 
 
+def _mock_summary(text="Riassunto di test."):
+    async def _fake(markdown):
+        return text
+    return patch("main.generate_document_summary", side_effect=_fake)
+
+
+def _mock_classify(result=None):
+    """Mocka classify_chunks; result è il dict applicato a ogni chunk."""
+    enr = result or {"discipline": [], "tags": [], "entities": None}
+    async def _fake(texts, hint=None):
+        return [dict(enr) for _ in texts]
+    return patch("main.classify_chunks", side_effect=_fake)
+
+
 # ── /health ─────────────────────────────────────────────────────────────────
 
 def test_health_returns_ok():
@@ -205,7 +219,7 @@ def test_path_traversal_in_filename_stripped():
 # ── Parse success ────────────────────────────────────────────────────────────
 
 def test_parse_success_full_response():
-    with _mock_ocr("# Titolo\n" + "parola " * 100), _mock_embeddings():
+    with _mock_ocr("# Titolo\n" + "parola " * 100), _mock_embeddings(), _mock_summary():
         resp = _upload(
             filename="report.txt",
             modulo="contratti",
@@ -220,13 +234,103 @@ def test_parse_success_full_response():
     assert meta["categoria"] == "legale"
     assert meta["n_chunks"] >= 1
     assert meta["file"] == "report.txt"
+    assert meta["riassunto_documento"] == "Riassunto di test."
 
     chunks = body["chunks"]
     assert len(chunks) == meta["n_chunks"]
     assert chunks[0]["chunk_index"] == 0
     assert len(chunks[0]["embedding"]) == 1536
     assert chunks[0]["modulo"] == "contratti"
+    assert chunks[0]["discipline"] == ["contratti"]
+    assert "heading_path" in chunks[0]
     assert chunks[0]["documento_id"] == "doc-123"
+
+
+def test_parse_embedding_input_is_contextualized():
+    """L'input dell'embedding deve includere titolo+riassunto+sezione; il
+    contenuto salvato deve invece restare pulito (senza prefisso)."""
+    captured = {}
+
+    async def _capture(texts):
+        captured["texts"] = texts
+        return [[0.1] * 1536 for _ in texts]
+
+    with _mock_ocr("# Capitolo\nparola " + "x " * 100), \
+         patch("main.generate_embeddings_batch", side_effect=_capture), \
+         _mock_summary("Tema del documento."):
+        resp = _upload(filename="rel.txt", modulo="fiscalita")
+
+    assert resp.status_code == 200
+    # L'input embedding è arricchito col contesto
+    assert captured["texts"][0].startswith("[Doc: rel.txt — Tema del documento. — Sezione: Capitolo]")
+    # Il contenuto restituito (e quindi salvato) NON ha il prefisso
+    assert not resp.json()["chunks"][0]["contenuto"].startswith("[Doc:")
+
+
+def test_parse_summary_failure_degrades_gracefully():
+    """Se il riassunto LLM fallisce, l'ingestion procede con riassunto=None."""
+    async def _boom(markdown):
+        raise RuntimeError("OPENAI_API_KEY non impostata")
+
+    with _mock_ocr("# T\nparola " * 60), _mock_embeddings(), \
+         patch("main.generate_document_summary", side_effect=_boom):
+        resp = _upload(modulo="fiscalita")
+
+    assert resp.status_code == 200
+    assert resp.json()["metadata"]["riassunto_documento"] is None
+
+
+# ── Classificazione multi-disciplina (Fase 1.1/1.2) ──────────────────────────
+
+def test_parse_merges_classified_disciplines_with_modulo_first():
+    enr = {
+        "discipline": ["assicurazioni", "fiscalita"],
+        "tags": ["annullamento"],
+        "entities": {"riferimenti_normativi": ["Dlgs 62/2024"]},
+    }
+    with _mock_ocr(), _mock_embeddings(), _mock_summary(), _mock_classify(enr):
+        resp = _upload(modulo="fiscalita")
+    assert resp.status_code == 200
+    chunk = resp.json()["chunks"][0]
+    # modulo sempre primo, niente duplicati
+    assert chunk["discipline"] == ["fiscalita", "assicurazioni"]
+    assert chunk["tags"] == ["annullamento"]
+    assert chunk["entities"] == {"riferimenti_normativi": ["Dlgs 62/2024"]}
+
+
+def test_parse_classification_failure_falls_back_to_modulo():
+    """Se la classificazione fallisce, discipline=[modulo], tags=[], entities=None."""
+    async def _boom(texts, hint=None):
+        raise RuntimeError("LLM giù")
+
+    with _mock_ocr(), _mock_embeddings(), _mock_summary(), \
+         patch("main.classify_chunks", side_effect=_boom):
+        resp = _upload(modulo="contratti")
+
+    assert resp.status_code == 200
+    chunk = resp.json()["chunks"][0]
+    assert chunk["discipline"] == ["contratti"]
+    assert chunk["tags"] == []
+    assert chunk["entities"] is None
+
+
+def test_parse_classifier_receives_clean_text():
+    """Il classificatore deve ricevere il contenuto pulito, non quello
+    contestualizzato per l'embedding."""
+    captured = {}
+
+    async def _capture(texts, hint=None):
+        captured["texts"] = texts
+        captured["hint"] = hint
+        return [{"discipline": [], "tags": [], "entities": None} for _ in texts]
+
+    with _mock_ocr("# Cap\n" + "parola " * 80), _mock_embeddings(), \
+         _mock_summary(), patch("main.classify_chunks", side_effect=_capture):
+        resp = _upload(modulo="trasporti")
+
+    assert resp.status_code == 200
+    assert captured["hint"] == "trasporti"
+    assert all(not t.startswith("[Doc:") for t in captured["texts"])
 
 
 def test_parse_empty_ocr_result_returns_422():

@@ -7,6 +7,7 @@ Endpoint:
 """
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -21,9 +22,14 @@ from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
+from pydantic import BaseModel, Field
 
-from chunker import chunk_markdown
+from chunker import chunk_markdown, build_contextual_text
 from embeddings import generate_embeddings_batch, EMBEDDING_DIM, get_client
+from enrichment import generate_document_summary, classify_chunks, empty_enrichment
+from search import search_pipeline, MAX_QUERY_CHARS, MAX_TOP_K
+from answer import answer_pipeline
+from cache import lookup_cached_document
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +83,19 @@ MAX_UPLOAD_MB   = int(os.getenv("MAX_UPLOAD_MB", "10"))
 CHUNK_SIZE      = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP   = int(os.getenv("CHUNK_OVERLAP", "50"))
 OCR_TIMEOUT     = float(os.getenv("OCR_TIMEOUT", "60"))
+
+# Contextual retrieval: arricchisce l'INPUT dell'embedding con titolo, riassunto
+# e breadcrumb di sezione. Il testo salvato resta pulito. Disattivabile per
+# tornare al comportamento pre-Fase-1 (embedding del solo contenuto del chunk).
+CONTEXTUAL_EMBEDDING = os.getenv("CONTEXTUAL_EMBEDDING", "true").lower() in ("1", "true", "yes", "on")
+SUMMARY_TIMEOUT = float(os.getenv("SUMMARY_TIMEOUT", "15"))
+
+# Timeout complessivo per la classificazione multi-disciplina (i batch girano
+# in parallelo, quindi copre ~1 round-trip LLM più i retry).
+CLASSIFY_TIMEOUT = float(os.getenv("CLASSIFY_TIMEOUT", "45"))
+
+# Cache D4: lookup per content_hash su Supabase prima di OCR + embedding.
+PARSE_CACHE = os.getenv("PARSE_CACHE", "true").lower() in ("1", "true", "yes", "on")
 
 PARSER_SHARED_SECRET = os.getenv("PARSER_SHARED_SECRET")
 
@@ -171,6 +190,35 @@ def _is_rate_limited(ip: str) -> bool:
     return False
 
 
+async def _safe_document_summary(markdown_text: str) -> Optional[str]:
+    """
+    Genera il riassunto del documento senza mai far fallire l'ingestion:
+    timeout stretto + cattura di ogni errore (es. OPENAI_API_KEY assente,
+    rate limit). In caso di problema ritorna None e il contesto degrada al
+    solo titolo + breadcrumb.
+    """
+    try:
+        return await asyncio.wait_for(
+            generate_document_summary(markdown_text), timeout=SUMMARY_TIMEOUT
+        )
+    except Exception as e:
+        log.warning("summary_failed", extra={"error": str(e)})
+        return None
+
+
+async def _safe_classify_chunks(texts: List[str], hint: str) -> List[dict]:
+    """
+    Classificazione multi-disciplina che non fa mai fallire l'ingestion:
+    in caso di timeout o errore ogni chunk degrada al risultato neutro
+    (il chiamante vi unisce il modulo legacy come unica disciplina).
+    """
+    try:
+        return await asyncio.wait_for(classify_chunks(texts, hint), timeout=CLASSIFY_TIMEOUT)
+    except Exception as e:
+        log.warning("classify_failed", extra={"error": str(e), "n_chunks": len(texts)})
+        return [empty_enrichment() for _ in texts]
+
+
 async def _read_limited(file: UploadFile, max_bytes: int) -> bytes:
     """Legge in chunk da 64KB; rifiuta (413) non appena il totale supera max_bytes."""
     parts: List[bytes] = []
@@ -227,6 +275,124 @@ async def ready():
     if not all_ok:
         raise HTTPException(status_code=503, detail=payload)
     return payload
+
+
+class SearchRequest(BaseModel):
+    domanda: str = Field(..., min_length=1, max_length=MAX_QUERY_CHARS)
+    top_k: Optional[int] = Field(None, ge=1, le=MAX_TOP_K)
+    # Boost morbido (mai filtro rigido), sommato alle discipline individuate
+    # dalla decomposizione.
+    discipline: Optional[List[str]] = Field(None, max_length=12)
+    rerank: Optional[bool] = None
+
+
+@app.post("/search")
+async def search_endpoint(
+    request: Request,
+    body: SearchRequest,
+    authorization: Optional[str] = Header(None),
+):
+    # --- Rate limiting (condivide il bucket con /parse) ---
+    client_ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Troppe richieste. Riprova tra un minuto.")
+
+    # --- Auth opzionale ---
+    if PARSER_SHARED_SECRET:
+        token = (authorization or "").replace("Bearer ", "")
+        if token != PARSER_SHARED_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    domanda = body.domanda.strip()
+    if not domanda:
+        raise HTTPException(status_code=400, detail="domanda non può essere vuota")
+
+    log.info(
+        "search_start",
+        extra={"domanda_len": len(domanda), "top_k": body.top_k, "discipline": body.discipline},
+    )
+    t0 = time.monotonic()
+    try:
+        result = await search_pipeline(
+            domanda=domanda,
+            top_k=body.top_k,
+            discipline=body.discipline,
+            rerank=body.rerank,
+        )
+    except RuntimeError as e:
+        # Config mancante o tutte le sotto-domande fallite
+        log.exception("search_config_or_total_failure")
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log.exception("search_error")
+        raise HTTPException(status_code=502, detail=f"Errore search: {e}")
+
+    duration = round(time.monotonic() - t0, 3)
+    log.info(
+        "search_done",
+        extra={
+            "duration_s": duration,
+            "n_risultati": len(result.get("risultati", [])),
+            "n_candidati": result.get("n_candidati", 0),
+        },
+    )
+    result["duration_s"] = duration
+    return result
+
+
+class AnswerRequest(BaseModel):
+    domanda: str = Field(..., min_length=1, max_length=MAX_QUERY_CHARS)
+    top_k: Optional[int] = Field(None, ge=1, le=MAX_TOP_K)
+    discipline: Optional[List[str]] = Field(None, max_length=12)
+
+
+@app.post("/answer")
+async def answer_endpoint(
+    request: Request,
+    body: AnswerRequest,
+    authorization: Optional[str] = Header(None),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Troppe richieste. Riprova tra un minuto.")
+
+    if PARSER_SHARED_SECRET:
+        token = (authorization or "").replace("Bearer ", "")
+        if token != PARSER_SHARED_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    domanda = body.domanda.strip()
+    if not domanda:
+        raise HTTPException(status_code=400, detail="domanda non può essere vuota")
+
+    log.info("answer_start", extra={"domanda_len": len(domanda), "top_k": body.top_k})
+    t0 = time.monotonic()
+    try:
+        result = await answer_pipeline(
+            domanda=domanda,
+            top_k=body.top_k,
+            discipline=body.discipline,
+        )
+    except asyncio.TimeoutError:
+        log.exception("answer_timeout")
+        raise HTTPException(status_code=504, detail="Timeout sintesi LLM")
+    except RuntimeError as e:
+        log.exception("answer_config_or_total_failure")
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log.exception("answer_error")
+        raise HTTPException(status_code=502, detail=f"Errore answer: {e}")
+
+    duration = round(time.monotonic() - t0, 3)
+    log.info(
+        "answer_done",
+        extra={
+            "duration_s": duration,
+            "n_citazioni": len(result.get("citazioni", [])),
+        },
+    )
+    result["duration_s"] = duration
+    return result
 
 
 @app.post("/parse")
@@ -287,8 +453,48 @@ async def parse_file(
         raise HTTPException(status_code=413, detail=f"File troppo grande (max {MAX_UPLOAD_MB}MB)")
     contents = await _read_limited(file, max_bytes)
     size_mb = len(contents) / (1024 * 1024)
+    content_hash = hashlib.sha256(contents).hexdigest()
 
     log.info("parse_start", extra={"file": safe_filename, "size_mb": round(size_mb, 3), "modulo": modulo})
+
+    # --- 0. Cache D4: documento identico già ingerito? (best-effort) ---
+    if PARSE_CACHE:
+        cached = await lookup_cached_document(content_hash)
+        if cached:
+            log.info("cache_hit", extra={"content_hash": content_hash, "n_chunks": len(cached["chunks"])})
+            chunks_out = [
+                {
+                    "chunk_index": ch["chunk_index"],
+                    "contenuto": ch["contenuto"],
+                    "embedding": ch["embedding"],
+                    "heading": ch["heading"],
+                    "heading_path": ch["heading"],
+                    "modulo": modulo,
+                    "discipline": ch["discipline"] or [modulo.strip().lower()],
+                    "tags": ch["tags"],
+                    "entities": ch["entities"],
+                    "categoria": categoria,
+                    "documento_id": documento_id,
+                }
+                for ch in cached["chunks"]
+            ]
+            return {
+                "markdown": cached["markdown"],
+                "chunks": chunks_out,
+                "metadata": {
+                    "file": safe_filename,
+                    "size_mb": round(size_mb, 2),
+                    "modulo": modulo,
+                    "categoria": categoria,
+                    "n_chunks": len(chunks_out),
+                    "riassunto_documento": cached["riassunto"],
+                    "embedding_model": "text-embedding-3-small",
+                    "embedding_dim": EMBEDDING_DIM,
+                    "content_hash": content_hash,
+                    "cached": True,
+                    "documento_id_cache": cached["documento_id"],
+                },
+            }
 
     # --- 1. Estrai testo con Markitdown ---
     t0 = time.monotonic()
@@ -322,28 +528,58 @@ async def parse_file(
         raise HTTPException(status_code=422, detail="Nessun chunk generato")
     log.info("chunking_done", extra={"n_chunks": len(chunks), "duration_s": round(time.monotonic() - t1, 3)})
 
-    # --- 3. Embedding batch ---
+    # --- 2b. Riassunto documento (contextual retrieval) ---
+    riassunto = None
+    if CONTEXTUAL_EMBEDDING:
+        ts = time.monotonic()
+        riassunto = await _safe_document_summary(markdown_text)
+        log.info("summary_done", extra={"has_summary": riassunto is not None, "duration_s": round(time.monotonic() - ts, 3)})
+
+    # --- 3. Embedding + classificazione multi-disciplina in parallelo ---
+    # L'input dell'embedding è arricchito col contesto (titolo + riassunto +
+    # breadcrumb di sezione); il testo salvato in `contenuto` resta pulito.
+    # La classificazione lavora sul testo pulito e gira in parallelo: nel caso
+    # tipico non aggiunge latenza rispetto al solo embedding.
     t2 = time.monotonic()
-    try:
+    if CONTEXTUAL_EMBEDDING:
+        texts = [
+            build_contextual_text(c["contenuto"], c["heading_path"], safe_filename, riassunto)
+            for c in chunks
+        ]
+    else:
         texts = [c["contenuto"] for c in chunks]
+
+    classify_task = asyncio.ensure_future(
+        _safe_classify_chunks([c["contenuto"] for c in chunks], modulo)
+    )
+    try:
         embeddings = await generate_embeddings_batch(texts)
     except Exception as e:
+        classify_task.cancel()
         log.exception("Embedding error")
         raise HTTPException(status_code=502, detail=f"Errore OpenAI: {e}")
+    enrichments = await classify_task
     log.info("embedding_done", extra={"n_texts": len(texts), "duration_s": round(time.monotonic() - t2, 3)})
 
     # --- 4. Costruisci risposta pronta per INSERT su Supabase ---
+    # Schema multidisciplinare: il modulo del form resta la prima disciplina
+    # (retrocompatibilità); la classificazione LLM aggiunge le altre.
+    modulo_norm = modulo.strip().lower()
     chunks_out = [
         {
             "chunk_index": c["chunk_index"],
             "contenuto": c["contenuto"],
             "embedding": emb,
             "heading": c["heading"],
+            "heading_path": c["heading_path"],
             "modulo": modulo,
+            "discipline": [modulo] + [d for d in enr["discipline"] if d != modulo_norm],
+            "tags": enr["tags"],
+            "entities": enr["entities"],
             "categoria": categoria,
             "documento_id": documento_id,
         }
-        for c, emb in zip(chunks, embeddings)
+        for c, emb, enr in zip(chunks, embeddings, enrichments)
     ]
 
     return {
@@ -355,7 +591,10 @@ async def parse_file(
             "modulo": modulo,
             "categoria": categoria,
             "n_chunks": len(chunks),
+            "riassunto_documento": riassunto,
             "embedding_model": "text-embedding-3-small",
             "embedding_dim": EMBEDDING_DIM,
+            "content_hash": content_hash,
+            "cached": False,
         },
     }
