@@ -3,7 +3,7 @@ Test base per chunker.
 Esegui con: pytest tests/test_chunker.py
 """
 
-from chunker import chunk_markdown, _split_by_headings, _word_count
+from chunker import chunk_markdown, _split_by_headings, _word_count, build_contextual_text
 
 
 def test_split_by_headings_no_headings():
@@ -95,3 +95,65 @@ def test_merge_multiple_tiny_chunks_accumulate():
     chunks = chunk_markdown(md, chunk_size=500, min_chunk_words=50)
     for c in chunks[:-1]:  # l'ultimo potrebbe essere assorbito dal precedente
         assert _word_count(c["contenuto"]) >= 50
+
+
+# ── Gerarchia heading (contextual retrieval) ─────────────────────────────────
+
+def test_heading_path_builds_full_breadcrumb():
+    md = """# Capitolo 1
+intro
+
+## Sezione 1.1
+testo a
+
+### Dettaglio 1.1.1
+testo b
+
+## Sezione 1.2
+testo c"""
+    secs = _split_by_headings(md)
+    paths = {s["heading"]: s["heading_path"] for s in secs}
+    assert paths["Capitolo 1"] == "Capitolo 1"
+    assert paths["Sezione 1.1"] == "Capitolo 1 > Sezione 1.1"
+    assert paths["Dettaglio 1.1.1"] == "Capitolo 1 > Sezione 1.1 > Dettaglio 1.1.1"
+    # Tornando a livello 2, il dettaglio di livello 3 esce dal percorso
+    assert paths["Sezione 1.2"] == "Capitolo 1 > Sezione 1.2"
+
+
+def test_heading_path_none_without_headings():
+    secs = _split_by_headings("solo testo")
+    assert secs[0]["heading_path"] is None
+
+
+def test_chunk_markdown_exposes_heading_path():
+    # Sezioni con corpo reale così non vengono fuse: il breadcrumb annidato
+    # "A > B" deve comparire sul chunk della sotto-sezione.
+    md = "# A\n" + ("parola " * 100) + "\n## B\n" + ("parola " * 100)
+    chunks = chunk_markdown(md, chunk_size=500)
+    assert all("heading_path" in c for c in chunks)
+    assert any(c["heading_path"] and "A > B" in c["heading_path"] for c in chunks)
+
+
+# ── build_contextual_text ────────────────────────────────────────────────────
+
+def test_contextual_text_full_prefix():
+    out = build_contextual_text(
+        "Art. 5 rimborso entro 14 giorni",
+        heading_path="Condizioni > Recesso",
+        titolo="contratto.pdf",
+        riassunto="Condizioni generali pacchetti turistici.",
+    )
+    assert out.startswith("[Doc: contratto.pdf — Condizioni generali pacchetti turistici. — Sezione: Condizioni > Recesso]")
+    # Il testo originale resta presente, separato dal prefisso
+    assert "Art. 5 rimborso entro 14 giorni" in out
+    assert out.endswith("Art. 5 rimborso entro 14 giorni")
+
+
+def test_contextual_text_no_metadata_returns_clean():
+    # Senza titolo/riassunto/heading_path l'input resta identico al contenuto
+    assert build_contextual_text("solo testo", heading_path=None) == "solo testo"
+
+
+def test_contextual_text_partial_metadata():
+    out = build_contextual_text("testo", heading_path="S1", titolo="doc.txt")
+    assert out.startswith("[Doc: doc.txt — Sezione: S1]")
