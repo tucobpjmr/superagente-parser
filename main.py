@@ -21,9 +21,11 @@ from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from markitdown import MarkItDown
+from pydantic import BaseModel, Field
 
 from chunker import chunk_markdown
 from embeddings import generate_embeddings_batch, EMBEDDING_DIM, get_client
+from search import search_pipeline, MAX_QUERY_CHARS, MAX_SUBQUERIES, MAX_TOP_K
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +229,69 @@ async def ready():
     if not all_ok:
         raise HTTPException(status_code=503, detail=payload)
     return payload
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=MAX_QUERY_CHARS)
+    top_k: int = Field(8, ge=1, le=MAX_TOP_K)
+    n_subqueries: int = Field(3, ge=1, le=MAX_SUBQUERIES)
+    per_sub_k: int = Field(12, ge=1, le=40)
+    rerank: bool = True
+
+
+@app.post("/search")
+async def search_endpoint(
+    request: Request,
+    body: SearchRequest,
+    authorization: Optional[str] = Header(None),
+):
+    # --- Rate limiting (condivide il bucket con /parse) ---
+    client_ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Troppe richieste. Riprova tra un minuto.")
+
+    # --- Auth opzionale ---
+    if PARSER_SHARED_SECRET:
+        token = (authorization or "").replace("Bearer ", "")
+        if token != PARSER_SHARED_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query non può essere vuota")
+
+    log.info(
+        "search_start",
+        extra={"query_len": len(query), "top_k": body.top_k, "n_sub": body.n_subqueries},
+    )
+    t0 = time.monotonic()
+    try:
+        result = await search_pipeline(
+            query=query,
+            top_k=body.top_k,
+            n_subqueries=body.n_subqueries,
+            per_sub_k=body.per_sub_k,
+            rerank=body.rerank,
+        )
+    except RuntimeError as e:
+        # Config mancante o tutte le sotto-query fallite
+        log.exception("search_config_or_total_failure")
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log.exception("search_error")
+        raise HTTPException(status_code=502, detail=f"Errore search: {e}")
+
+    duration = round(time.monotonic() - t0, 3)
+    log.info(
+        "search_done",
+        extra={
+            "duration_s": duration,
+            "n_results": len(result.get("results", [])),
+            "n_candidates": result.get("n_candidates", 0),
+        },
+    )
+    result["duration_s"] = duration
+    return result
 
 
 @app.post("/parse")

@@ -30,6 +30,40 @@ Microservizio FastAPI per estrarre testo da documenti (PDF, DOCX, XLSX, PPTX, HT
 }
 ```
 
+### `POST /search`
+Ricerca ibrida RAG con decomposizione + fan-out + RRF + re-ranking.
+
+**JSON body**:
+```json
+{
+  "query": "Quali documenti servono per la Thailandia e che clima c'è a luglio?",
+  "top_k": 8,
+  "n_subqueries": 3,
+  "per_sub_k": 12,
+  "rerank": true
+}
+```
+
+**Pipeline**:
+1. **Decomposizione**: LLM scompone la domanda in sotto-domande, ognuna con disciplina target (`visti`, `meteo`, `controversie`, `generale`, …)
+2. **Fan-out parallelo**: per ogni sotto-domanda, embedding + RPC `match_chunks` su Supabase (ibrida dense+FTS con RRF interno e boost ×1.5 sui chunk con disciplina matching)
+3. **Fusione RRF** dei risultati tra sotto-domande
+4. **Re-ranking** LLM opzionale dei top-20 candidati
+
+**Risposta**:
+```json
+{
+  "query": "...",
+  "subqueries": [{"text": "...", "discipline": ["visti"]}, ...],
+  "n_candidates": 14,
+  "results": [{"id": "...", "documento_id": "...", "contenuto": "...", "heading": "...", "discipline": [...], "score": 0.83, "rrf_score": 0.042}],
+  "duration_s": 1.42,
+  "errors": null
+}
+```
+
+Richiede env `SUPABASE_URL` e `SUPABASE_SERVICE_KEY` (vedi sotto). Auth: stesso `PARSER_SHARED_SECRET` di `/parse`.
+
 ### `GET /health`
 Healthcheck per Railway.
 
@@ -59,6 +93,9 @@ curl -X POST http://localhost:8000/parse \
    - `OPENAI_API_KEY`
    - `PARSER_SHARED_SECRET` (genera con `openssl rand -hex 32`)
    - `MAX_UPLOAD_MB=10`
+   - `SUPABASE_URL` (es. `https://xxx.supabase.co`) — necessaria per `/search`
+   - `SUPABASE_SERVICE_KEY` (service-role key, **non** la anon key) — necessaria per `/search`
+   - `SEARCH_LLM_MODEL=gpt-4o-mini` (opzionale, default per decomposizione e re-ranking)
 4. `railway up`
 5. Copia l'URL pubblico → mettilo in `PYTHON_PARSER_URL` lato Next.js
 
