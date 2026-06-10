@@ -7,6 +7,7 @@ Endpoint:
 """
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -28,6 +29,7 @@ from embeddings import generate_embeddings_batch, EMBEDDING_DIM, get_client
 from enrichment import generate_document_summary, classify_chunks, empty_enrichment
 from search import search_pipeline, MAX_QUERY_CHARS, MAX_TOP_K
 from answer import answer_pipeline
+from cache import lookup_cached_document
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +93,9 @@ SUMMARY_TIMEOUT = float(os.getenv("SUMMARY_TIMEOUT", "15"))
 # Timeout complessivo per la classificazione multi-disciplina (i batch girano
 # in parallelo, quindi copre ~1 round-trip LLM più i retry).
 CLASSIFY_TIMEOUT = float(os.getenv("CLASSIFY_TIMEOUT", "45"))
+
+# Cache D4: lookup per content_hash su Supabase prima di OCR + embedding.
+PARSE_CACHE = os.getenv("PARSE_CACHE", "true").lower() in ("1", "true", "yes", "on")
 
 PARSER_SHARED_SECRET = os.getenv("PARSER_SHARED_SECRET")
 
@@ -448,8 +453,48 @@ async def parse_file(
         raise HTTPException(status_code=413, detail=f"File troppo grande (max {MAX_UPLOAD_MB}MB)")
     contents = await _read_limited(file, max_bytes)
     size_mb = len(contents) / (1024 * 1024)
+    content_hash = hashlib.sha256(contents).hexdigest()
 
     log.info("parse_start", extra={"file": safe_filename, "size_mb": round(size_mb, 3), "modulo": modulo})
+
+    # --- 0. Cache D4: documento identico già ingerito? (best-effort) ---
+    if PARSE_CACHE:
+        cached = await lookup_cached_document(content_hash)
+        if cached:
+            log.info("cache_hit", extra={"content_hash": content_hash, "n_chunks": len(cached["chunks"])})
+            chunks_out = [
+                {
+                    "chunk_index": ch["chunk_index"],
+                    "contenuto": ch["contenuto"],
+                    "embedding": ch["embedding"],
+                    "heading": ch["heading"],
+                    "heading_path": ch["heading"],
+                    "modulo": modulo,
+                    "discipline": ch["discipline"] or [modulo.strip().lower()],
+                    "tags": ch["tags"],
+                    "entities": ch["entities"],
+                    "categoria": categoria,
+                    "documento_id": documento_id,
+                }
+                for ch in cached["chunks"]
+            ]
+            return {
+                "markdown": cached["markdown"],
+                "chunks": chunks_out,
+                "metadata": {
+                    "file": safe_filename,
+                    "size_mb": round(size_mb, 2),
+                    "modulo": modulo,
+                    "categoria": categoria,
+                    "n_chunks": len(chunks_out),
+                    "riassunto_documento": cached["riassunto"],
+                    "embedding_model": "text-embedding-3-small",
+                    "embedding_dim": EMBEDDING_DIM,
+                    "content_hash": content_hash,
+                    "cached": True,
+                    "documento_id_cache": cached["documento_id"],
+                },
+            }
 
     # --- 1. Estrai testo con Markitdown ---
     t0 = time.monotonic()
@@ -549,5 +594,7 @@ async def parse_file(
             "riassunto_documento": riassunto,
             "embedding_model": "text-embedding-3-small",
             "embedding_dim": EMBEDDING_DIM,
+            "content_hash": content_hash,
+            "cached": False,
         },
     }

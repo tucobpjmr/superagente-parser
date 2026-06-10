@@ -46,6 +46,21 @@ Disattivabile con `CONTEXTUAL_EMBEDDING=false` (torna all'embedding del solo
 contenuto del chunk) o `ENRICHMENT_ENABLED=false` (salta la sola chiamata LLM
 del riassunto, mantenendo titolo + sezione).
 
+### Caching per content_hash
+
+Prima di OCR + embedding, `/parse` calcola lo **SHA-256 dei byte del file** e
+cerca su Supabase un documento con lo stesso `content_hash`. In caso di hit i
+chunk (con embedding) vengono riletti da `document_chunks` e restituiti senza
+alcuna chiamata OpenAI (`metadata.cached: true`, `documento_id_cache` con
+l'id del documento già ingerito — utile al caller per evitare un duplicato).
+
+Il caller deve salvare `metadata.content_hash` nella colonna
+`documenti.content_hash` all'INSERT, altrimenti la cache non avrà mai hit.
+Best-effort: errori o Supabase non configurato → pipeline completa.
+Disattivabile con `PARSE_CACHE=false`. Dopo modifiche alla pipeline
+(CHUNK_SIZE, modello embedding, contextual retrieval) re-ingerire i documenti:
+la cache restituisce i chunk così come furono generati.
+
 ### Classificazione multi-disciplina ed entità
 
 Ogni chunk viene classificato via LLM (batch paralleli, stesso modello
