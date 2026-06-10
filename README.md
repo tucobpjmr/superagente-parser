@@ -123,6 +123,47 @@ Richiede env `SUPABASE_URL` e `SUPABASE_SERVICE_KEY`. Auth: stesso `PARSER_SHARE
 | `SEARCH_HTTP_TIMEOUT` | `15` | Timeout (s) chiamate Supabase |
 | `SEARCH_LLM_TIMEOUT` | `20` | Timeout (s) chiamate LLM |
 
+### `POST /answer`
+Sintesi con citazioni: ricerca + risposta integrata multidisciplinare.
+
+**JSON body**:
+```json
+{
+  "domanda": "Il cliente annulla la crociera per malattia: ha diritto al rimborso?",
+  "top_k": 8,
+  "discipline": ["contrattualistica", "assicurazioni"]
+}
+```
+
+**Pipeline**:
+1. Recupera top-k chunk via `search_pipeline` (decompose + RRF + rerank)
+2. Raggruppa i chunk per disciplina principale, numerati `[1]`, `[2]`, …
+3. Sintetizza con LLM (`ANSWER_MODEL`, default `gpt-4o`) — il prompt impone:
+   integrare le discipline, segnalare interazioni/conflitti, citare inline
+   con `[n]`, dichiarare insufficienza delle fonti invece di allucinare
+4. Restituisce risposta + array `citazioni` allineato agli `[n]` inline
+
+**Risposta**:
+```json
+{
+  "domanda": "...",
+  "risposta": "Il viaggiatore ha diritto al rimborso integrale [1]; la polizza copre l'annullamento se documentato [2]. Sul piano fiscale ...",
+  "citazioni": [
+    {"n": 1, "chunk_id": "uuid", "documento_id": "uuid", "nome_file": "contratto.pdf", "sezione": "Art. 12 — Recesso", "discipline": ["contrattualistica"], "disciplina": "contrattualistica"},
+    {"n": 2, "chunk_id": "uuid", "nome_file": "polizza.pdf", "sezione": "Coperture", "discipline": ["assicurazioni"], "disciplina": "assicurazioni"}
+  ],
+  "retrieval": {"sotto_domande": [...], "n_candidati": 14, "errors": null},
+  "duration_s": 4.21
+}
+```
+
+| Env var | Default | Uso |
+|---------|---------|-----|
+| `ANSWER_MODEL` | `gpt-4o` | Modello di sintesi (alza qualità rispetto al rerank) |
+| `ANSWER_LLM_TIMEOUT` | `45` | Timeout (s) sintesi |
+| `ANSWER_CHUNK_CHARS` | `1500` | Troncamento per chunk nel prompt |
+| `ANSWER_MAX_CITATIONS` | `12` | Cap sui chunk passati al sintetizzatore |
+
 ### `GET /health`
 Healthcheck per Railway.
 

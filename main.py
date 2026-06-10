@@ -27,6 +27,7 @@ from chunker import chunk_markdown, build_contextual_text
 from embeddings import generate_embeddings_batch, EMBEDDING_DIM, get_client
 from enrichment import generate_document_summary, classify_chunks, empty_enrichment
 from search import search_pipeline, MAX_QUERY_CHARS, MAX_TOP_K
+from answer import answer_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +329,61 @@ async def search_endpoint(
             "duration_s": duration,
             "n_risultati": len(result.get("risultati", [])),
             "n_candidati": result.get("n_candidati", 0),
+        },
+    )
+    result["duration_s"] = duration
+    return result
+
+
+class AnswerRequest(BaseModel):
+    domanda: str = Field(..., min_length=1, max_length=MAX_QUERY_CHARS)
+    top_k: Optional[int] = Field(None, ge=1, le=MAX_TOP_K)
+    discipline: Optional[List[str]] = Field(None, max_length=12)
+
+
+@app.post("/answer")
+async def answer_endpoint(
+    request: Request,
+    body: AnswerRequest,
+    authorization: Optional[str] = Header(None),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="Troppe richieste. Riprova tra un minuto.")
+
+    if PARSER_SHARED_SECRET:
+        token = (authorization or "").replace("Bearer ", "")
+        if token != PARSER_SHARED_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    domanda = body.domanda.strip()
+    if not domanda:
+        raise HTTPException(status_code=400, detail="domanda non può essere vuota")
+
+    log.info("answer_start", extra={"domanda_len": len(domanda), "top_k": body.top_k})
+    t0 = time.monotonic()
+    try:
+        result = await answer_pipeline(
+            domanda=domanda,
+            top_k=body.top_k,
+            discipline=body.discipline,
+        )
+    except asyncio.TimeoutError:
+        log.exception("answer_timeout")
+        raise HTTPException(status_code=504, detail="Timeout sintesi LLM")
+    except RuntimeError as e:
+        log.exception("answer_config_or_total_failure")
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        log.exception("answer_error")
+        raise HTTPException(status_code=502, detail=f"Errore answer: {e}")
+
+    duration = round(time.monotonic() - t0, 3)
+    log.info(
+        "answer_done",
+        extra={
+            "duration_s": duration,
+            "n_citazioni": len(result.get("citazioni", [])),
         },
     )
     result["duration_s"] = duration
