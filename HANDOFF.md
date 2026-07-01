@@ -1,6 +1,19 @@
 # Handoff — SuperAgente Parser
 
-> Stato al 2026-06-10 · branch `main` · PR #7 mergiata (squash, commit `5316474`)
+> Stato al 2026-07-01 · branch `claude/handoff-alignment-review-ea2f32`
+> PR #7 mergiata (commit `5316474`) · anello A risolto (`scripts/ingest.py`) · PR #4/#5 chiuse
+
+## Changelog rispetto al handoff precedente (2026-06-10)
+
+- ✅ **Anello A risolto**: aggiunto `scripts/ingest.py` — script standalone che
+  chiama `/parse` e fa l'INSERT su Supabase (`documenti` + `document_chunks`) con
+  la service_role key. Idempotente per `content_hash`, con `--force`, `--dry-run`,
+  `--dir`, batching e rollback anti-orfani. Coperto da 13 test (`tests/test_ingest.py`).
+  Suite totale: **103 test verdi**.
+- ✅ **PR #4 e #5 chiuse** (item C): `.env.example` già in main, piano superseduto da #7.
+- ⚠️ **Scoperta**: il progetto Supabase `pxtwdhhulobyrheioiex` è in stato
+  **`INACTIVE` (in pausa)**. Va **riattivato** dal dashboard prima di qualsiasi
+  ingestione/smoke test live. Finché è in pausa, `/search` e `/answer` non hanno DB.
 
 ---
 
@@ -38,8 +51,10 @@ requirements.txt — 7 dipendenze (markitdown 0.1.6, fastapi, openai, httpx, ten
 Dockerfile       — Python 3.11-slim + Tesseract ITA/ENG + Poppler
 railway.toml     — Railway build/deploy config
 .env.example     — Tutte le env var documentate con commenti
+scripts/
+  ingest.py      — Ingestione standalone: /parse → INSERT Supabase (anello A)
 supabase/        — Migrazioni SQL applicate (schema RAG, match_chunks RPC)
-tests/           — 90 test (tutti passano su main)
+tests/           — 103 test (tutti passano)
   test_api.py        — 23 test endpoint /parse
   test_search.py     — 13 test /search pipeline
   test_answer.py     — 9 test /answer pipeline
@@ -48,6 +63,7 @@ tests/           — 90 test (tutti passano su main)
   test_chunker.py    — 9 test chunker
   test_enrichment.py — test classificazione e riassunto
   test_filename.py   — 8 test sanitize_filename
+  test_ingest.py     — 13 test ingest.py (parser+Supabase mockati)
 eval/
   golden.jsonl   — 22 domande con discipline attese + substrings surrogati
   run_eval.py    — Misura recall@k, MRR, discipline coverage contro /search
@@ -147,11 +163,15 @@ Il caller previsto è la route Next.js `app/api/parse-file/route.ts`, che non è
 
 **Soluzioni possibili (in ordine di urgenza):**
 
-**1. Script standalone `scripts/ingest.py`** — da implementare nella prossima sessione.
+**1. Script standalone `scripts/ingest.py`** — ✅ **IMPLEMENTATO** (questa sessione).
 Chiama `/parse` e fa l'INSERT su Supabase direttamente. Permette di popolare la KB
-senza dipendere dal frontend Next.js.
+senza dipendere dal frontend Next.js. Idempotente per `content_hash`, con
+`--force`/`--dry-run`/`--dir`, batching a 100 chunk e rollback anti-orfani.
+Coperto da `tests/test_ingest.py`. Uso documentato nel README.
+**Blocco residuo**: serve solo riattivare il progetto Supabase e impostare le env
+(vedi sotto), poi lo script popola la KB.
 
-Logica da implementare:
+Logica implementata (per riferimento):
 ```python
 # 1. Leggi file locale
 # 2. POST multipart a /parse: file, modulo, categoria
@@ -207,10 +227,10 @@ python scripts/ingest.py \
 Il caller **deve** salvarlo in `documenti.content_hash` all'INSERT.
 Senza questo la cache non ha mai hit (lookup per hash → nessun match).
 
-### C. PR #4 e #5 ancora aperte (stantie)
+### C. PR #4 e #5 ✅ CHIUSE (questa sessione)
 
-- **PR #4** (`chore: add .env.example`) — `.env.example` è già in `main`; chiuderla
-- **PR #5** (`docs: piano di sviluppo`) — documento superseduto; chiuderla
+- **PR #4** (`chore: add .env.example`) — chiusa: `.env.example` già in `main`.
+- **PR #5** (`docs: piano di sviluppo`) — chiusa: superseduta da #7.
 
 ### D. RLS su 6 tabelle Supabase — debito D7 (sicurezza alta priorità)
 
@@ -237,7 +257,7 @@ Fix: Redis (Upstash, gratuito su Railway). Da fare solo se si scala a più worke
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio
 pytest tests/ -v
-# Expected: 90 passed
+# Expected: 103 passed
 # Non richiede OPENAI_API_KEY né Supabase: tutto mockato
 ```
 
@@ -255,9 +275,10 @@ pytest tests/ -v
 | 3.1 | `POST /answer` (sintesi con citazioni, anti-allucinazione) | ✅ completa |
 | 3.2 | Golden set di valutazione (22 domande, run_eval.py) | ✅ struttura — chunk_ids da annotare dopo ingestion |
 | D4 | Caching embedding per content_hash | ✅ completa — richiede INSERT corretto lato caller |
-| **A** | **Script ingestione standalone** (`scripts/ingest.py`) | ❌ **mancante — blocca ogni test live** |
+| **A** | **Script ingestione standalone** (`scripts/ingest.py`) | ✅ **completa — 13 test** |
 | **B** | **Route Next.js** con INSERT su Supabase | ❌ mancante — nell'altro repo |
-| **C** | Chiudere PR #4 e #5 stantie | 🟡 minore |
+| **C** | Chiudere PR #4 e #5 stantie | ✅ chiuse |
+| **∅** | **Riattivare progetto Supabase** (`INACTIVE`) | 🔴 blocca ogni test live |
 | **D7** | RLS Supabase sulle 6 tabelle | 🔴 alta priorità sicurezza |
 | **D1** | Rate limiting distribuito (Redis/Upstash) | 🟡 solo se si scala |
 | D5 | pytest-cov > 80% su main.py | 🟡 bassa |
@@ -266,6 +287,14 @@ pytest tests/ -v
 ---
 
 ## 7. Ordine di esecuzione consigliato — prossima sessione
+
+> Restano **solo passi manuali/live** (env, riattivazione DB, smoke test): il
+> codice per l'ingestione è pronto e testato.
+
+### Step 0 — Riattivare il progetto Supabase (manuale) 🔴 NUOVO
+
+Il progetto `pxtwdhhulobyrheioiex` è **`INACTIVE`**. Dal dashboard Supabase →
+Restore/Resume project. Senza questo, ingestione e `/search`/`/answer` non hanno DB.
 
 ### Step 1 — Impostare env Railway (manuale)
 
@@ -276,9 +305,10 @@ Nel progetto Railway del parser aggiungere:
 Railway dovrebbe rideploy automaticamente da `main` dopo il merge di #7.
 Verificare che `/health` e `/ready` rispondano 200.
 
-### Step 2 — Implementare `scripts/ingest.py`
+### Step 2 — Popolare la KB con `scripts/ingest.py` ✅ (script pronto)
 
-Prima cosa da fare in sessione: sblocca tutto il resto (test live, eval, cache).
+Lo script è implementato e testato. Basta eseguirlo su documenti reali (vedi
+README, sezione "Popolare la knowledge base"). Sblocca test live, eval e cache D4.
 
 ### Step 3 — Smoke test live
 
