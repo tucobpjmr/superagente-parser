@@ -11,9 +11,19 @@
   `--dir`, batching e rollback anti-orfani. Coperto da 13 test (`tests/test_ingest.py`).
   Suite totale: **103 test verdi**.
 - ✅ **PR #4 e #5 chiuse** (item C): `.env.example` già in main, piano superseduto da #7.
-- ⚠️ **Scoperta**: il progetto Supabase `pxtwdhhulobyrheioiex` è in stato
-  **`INACTIVE` (in pausa)**. Va **riattivato** dal dashboard prima di qualsiasi
-  ingestione/smoke test live. Finché è in pausa, `/search` e `/answer` non hanno DB.
+- ✅ **Supabase riattivato** (2026-07-07): il progetto `pxtwdhhulobyrheioiex` è di
+  nuovo `ACTIVE_HEALTHY`. Nota: nel dashboard si chiama "super-agente-viaggi", ma è
+  il progetto RAG (ha `documenti`/`document_chunks`/`match_chunks`); il progetto
+  "tullio" (`vmxvnxsqfisucugcpqlc`) è l'app task, senza schema RAG.
+- ✅ **Smoke test DB reale eseguito** (2026-07-07, via MCP): ingestione simulata con
+  le stesse scritture di `ingest.py` sul DB di produzione → INSERT documento+chunk
+  (literal pgvector ok), colonna FTS generata, `match_chunks` con ranking corretto
+  (denso+FTS+boost disciplina x1.5), lookup cache per `content_hash`, DELETE con
+  cascade. DB ripulito a fine test (0 documenti / 0 chunk).
+- ⚠️ **Vincolo ambiente Claude Code**: la network policy del container blocca ogni
+  host esterno (railway.app, supabase.co REST, api.openai.com) — l'unico canale è
+  l'MCP Supabase. **L'ingestione reale con `scripts/ingest.py` va eseguita dalla
+  macchina dell'utente**, non da una sessione remota.
 
 ---
 
