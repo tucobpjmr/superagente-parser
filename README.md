@@ -182,6 +182,40 @@ Sintesi con citazioni: ricerca + risposta integrata multidisciplinare.
 ### `GET /health`
 Healthcheck per Railway.
 
+## Popolare la knowledge base — `scripts/ingest.py`
+
+`/parse` restituisce i chunk con embedding ma **non scrive** su Supabase: lo deve
+fare il caller. In produzione il caller è la route Next.js; per popolare la KB da
+riga di comando (test live, eval, backfill) usa lo script di ingestione, che
+chiama `/parse` e fa l'INSERT su `documenti` + `document_chunks` con la
+**service_role** key.
+
+```bash
+python scripts/ingest.py \
+  --parser-url https://<railway>.up.railway.app \
+  --secret $PARSER_SHARED_SECRET \
+  --supabase-url https://<project-ref>.supabase.co \
+  --supabase-key $SUPABASE_SERVICE_KEY \
+  --modulo contrattualistica --categoria normativa \
+  --file documento.pdf --file altro.docx
+
+# oppure un'intera cartella (tutti i file con estensione supportata):
+python scripts/ingest.py ... --dir ./documenti --modulo turismo --categoria faq
+```
+
+`--secret`, `--supabase-url` e `--supabase-key` si possono omettere se presenti
+come env `PARSER_SHARED_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`.
+
+- **Idempotente**: prima di chiamare `/parse` calcola lo SHA-256 del file e
+  **salta** i documenti già presenti (stesso `content_hash` della cache D4).
+- `--force`: cancella e re-ingerisce un documento già presente.
+- `--dry-run`: chiama `/parse` ma non scrive nulla su Supabase.
+- Su errore nell'inserimento dei chunk, il documento appena creato viene
+  rimosso (niente documenti orfani).
+
+Il campo `content_hash` viene salvato su `documenti`, quindi dopo la prima
+ingestione la **cache D4** ha hit sui documenti identici.
+
 ## Sviluppo locale
 
 ```bash

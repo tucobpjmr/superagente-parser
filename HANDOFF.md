@@ -1,6 +1,7 @@
 # Handoff — SuperAgente Parser
 
-> Stato al 2026-06-10 · branch `main` · PR #7 mergiata (squash, commit `5316474`)
+> Stato al 2026-07-07 · branch `claude/handoff-alignment-review-ea2f32` (PR #8 draft)
+> Ultimo commit: `main` = `245c47e`, branch = 3 commit avanti
 
 ---
 
@@ -18,11 +19,12 @@ Browser / Next.js → [PARSER_SHARED_SECRET] → POST /parse   → OpenAI embedd
 
 **Repo**: `tucobpjmr/superagente-parser`
 **Supabase progetto RAG**: `pxtwdhhulobyrheioiex` · `https://pxtwdhhulobyrheioiex.supabase.co`
-**Supabase progetto storico** (super-agente-viaggi): `vmxvnxsqfisucugcpqlc` (non toccato)
+  ⚠️ Nel dashboard si chiama "super-agente-viaggi" — ma è il DB RAG corretto.
+**Supabase progetto app task** (Tullio): `vmxvnxsqfisucugcpqlc` — non toccarlo.
 
 ---
 
-## 2. Stato del codice (main, commit `5316474`)
+## 2. Stato del codice (branch `claude/handoff-alignment-review-ea2f32`)
 
 ### File principali
 
@@ -38,8 +40,17 @@ requirements.txt — 7 dipendenze (markitdown 0.1.6, fastapi, openai, httpx, ten
 Dockerfile       — Python 3.11-slim + Tesseract ITA/ENG + Poppler
 railway.toml     — Railway build/deploy config
 .env.example     — Tutte le env var documentate con commenti
-supabase/        — Migrazioni SQL applicate (schema RAG, match_chunks RPC)
-tests/           — 90 test (tutti passano su main)
+scripts/
+  ingest.py      — Ingestione standalone: chiama /parse → INSERT su Supabase
+                   (anello A, implementato 2026-07-01)
+supabase/migrations/
+  20260609000000_rag_schema.sql          — Schema RAG (documenti, document_chunks, indici)
+  20260609000001_match_chunks.sql        — RPC match_chunks (RRF ibrida densa+FTS)
+  20260609000002_relax_legacy_checks.sql — Rimozione CHECK legacy troppo rigidi
+  20260707000000_security_fixes.sql      — search_path fisso, drop indice duplicato
+  20260707000001_rls_policies.sql        — RLS + policy SELECT public su tutte le tabelle
+  20260707000002_drop_legacy_match_chunks.sql — Drop versione legacy match_chunks
+tests/           — 103 test (tutti passano)
   test_api.py        — 23 test endpoint /parse
   test_search.py     — 13 test /search pipeline
   test_answer.py     — 9 test /answer pipeline
@@ -48,6 +59,7 @@ tests/           — 90 test (tutti passano su main)
   test_chunker.py    — 9 test chunker
   test_enrichment.py — test classificazione e riassunto
   test_filename.py   — 8 test sanitize_filename
+  test_ingest.py     — 13 test ingest.py (parser+Supabase mockati httpx)
 eval/
   golden.jsonl   — 22 domande con discipline attese + substrings surrogati
   run_eval.py    — Misura recall@k, MRR, discipline coverage contro /search
@@ -56,28 +68,9 @@ eval/
     sample.pdf   — PDF minimale per test E2E
 ```
 
-### Endpoint
-
-| Metodo | Path | Uso |
-|--------|------|-----|
-| `GET` | `/health` | Liveness (Railway) — nessuna I/O |
-| `GET` | `/ready` | Readiness — verifica OPENAI_API_KEY e markitdown |
-| `POST` | `/parse` | Parsing + embedding + enrichment; JSON out pronto per INSERT Supabase |
-| `POST` | `/search` | Retrieval: decompose → fan-out RRF → rerank |
-| `POST` | `/answer` | Sintesi con citazioni: search + LLM |
-
-### Tassonomia discipline (chiusa, in `enrichment.py`)
-
-```
-fiscalita, contrattualistica, assicurazioni, trasporti, turismo,
-normativa-ue, privacy, contabilita, visti-documenti, dogane,
-salute-sicurezza, controversie
-```
-Sovrascrivibile via env `DISCIPLINE_TAXONOMY` (CSV).
-
 ---
 
-## 3. Variabili d'ambiente complete
+## 3. Variabili d'ambiente
 
 ### Già impostate su Railway (presupposte)
 
@@ -88,216 +81,114 @@ Sovrascrivibile via env `DISCIPLINE_TAXONOMY` (CSV).
 
 ### ⚠️ DA IMPOSTARE SU RAILWAY — senza queste `/search` e `/answer` tornano 503
 
-| Variabile | Valore | Note |
-|-----------|--------|------|
-| `SUPABASE_URL` | `https://pxtwdhhulobyrheioiex.supabase.co` | |
-| `SUPABASE_SERVICE_KEY` | dashboard → Project Settings → API → **service_role** (secret) | mai la anon key |
+| Variabile | Valore |
+|-----------|--------|
+| `SUPABASE_URL` | `https://pxtwdhhulobyrheioiex.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | Dashboard Supabase → Project Settings → API → **service_role** |
 
 ### Opzionali con default
 
-| Variabile | Default | Uso |
-|-----------|---------|-----|
-| `MAX_UPLOAD_MB` | `10` | |
-| `CHUNK_SIZE` | `500` | |
-| `CHUNK_OVERLAP` | `50` | |
-| `OCR_TIMEOUT` | `60` | |
-| `CONTEXTUAL_EMBEDDING` | `true` | Antepone titolo+riassunto+breadcrumb all'input embedding |
-| `SUMMARY_TIMEOUT` | `15` | Timeout LLM riassunto documento |
-| `CLASSIFY_TIMEOUT` | `45` | Timeout classificazione chunk |
-| `ENRICHMENT_ENABLED` | `true` | Disattiva tutte le chiamate LLM di enrichment |
-| `ENRICHMENT_MODEL` | `gpt-4o-mini` | Modello per riassunto + classificazione |
-| `ENRICHMENT_BATCH_SIZE` | `16` | Chunk per chiamata classificazione |
-| `DISCIPLINE_TAXONOMY` | (usa default) | CSV per sovrascrivere tassonomia |
-| `PARSE_CACHE` | `true` | Cache SHA-256 su Supabase (richiede SUPABASE_*) |
-| `SEARCH_TOP_K` | `8` | Risultati finali /search e /answer |
-| `SEARCH_DECOMPOSE` | `true` | Decomposizione query in sotto-domande |
-| `SEARCH_RERANK` | `llm` | `llm` oppure `none` |
-| `DECOMPOSE_MODEL` | `gpt-4o-mini` | |
-| `RERANK_MODEL` | `gpt-4o-mini` | |
-| `SEARCH_HTTP_TIMEOUT` | `15` | Timeout Supabase RPC |
-| `SEARCH_LLM_TIMEOUT` | `20` | Timeout LLM per decompose/rerank |
-| `ANSWER_MODEL` | `gpt-4o` | Modello sintesi finale |
-| `ANSWER_LLM_TIMEOUT` | `45` | |
-| `ANSWER_CHUNK_CHARS` | `1500` | Troncamento chunk nel prompt sintesi |
-| `ANSWER_MAX_CITATIONS` | `12` | Cap chunk passati al sintetizzatore |
-| `PARSE_RATE_LIMIT` | `10` | Richieste per finestra |
-| `PARSE_RATE_WINDOW` | `60` | Finestra rate limit (secondi) |
-| `ALLOWED_ORIGINS` | (vuoto) | CORS, CSV (es. `https://app.example.com`) |
-| `LOG_FORMAT` | `json` | `json` oppure `text` |
+Documentate in `.env.example` (completo). Default ragionevoli per produzione.
 
 ---
 
-## 4. ⚠️ Anelli mancanti — da completare nella prossima sessione
+## 4. Stato Supabase (pxtwdhhulobyrheioiex) — al 2026-07-07
 
-### A. KB vuota — nessun documento ingerito (BLOCCO CRITICO)
-
-La knowledge base Supabase ha **0 documenti e 0 chunk**.
-`/search` e `/answer` funzionano tecnicamente ma restituiscono sempre risultati vuoti.
-
-**Flusso di ingestion ATTUALE (incompleto):**
-
-```
-PDF → POST /parse → JSON con chunks+embeddings
-                              ↓
-               ❌ ANELLO MANCANTE: nessuno fa l'INSERT su Supabase
-```
-
-`/parse` **restituisce** i chunk pronti ma **non scrive** su Supabase — lo deve fare il caller.
-Il caller previsto è la route Next.js `app/api/parse-file/route.ts`, che non è in questo repo.
-
-**Soluzioni possibili (in ordine di urgenza):**
-
-**1. Script standalone `scripts/ingest.py`** — da implementare nella prossima sessione.
-Chiama `/parse` e fa l'INSERT su Supabase direttamente. Permette di popolare la KB
-senza dipendere dal frontend Next.js.
-
-Logica da implementare:
-```python
-# 1. Leggi file locale
-# 2. POST multipart a /parse: file, modulo, categoria
-# 3. Estrai JSON: markdown, chunks[], metadata
-# 4. INSERT su documenti:
-#      nome_file, tipo_file, categoria, modulo
-#      contenuto_testo = markdown
-#      riassunto = metadata["riassunto_documento"]
-#      content_hash = metadata["content_hash"]   ← FONDAMENTALE per cache
-#      n_chunks = metadata["n_chunks"]
-# 5. Per ogni chunk in chunks[]:
-#      INSERT su document_chunks con documento_id appena creato
-# 6. Stampa documento_id e n_chunk inseriti
-```
-
-Target CLI:
-```bash
-python scripts/ingest.py \
-  --parser-url https://<railway>.up.railway.app \
-  --secret $PARSER_SHARED_SECRET \
-  --supabase-url https://pxtwdhhulobyrheioiex.supabase.co \
-  --supabase-key $SUPABASE_SERVICE_KEY \
-  --file documento.pdf \
-  --modulo contrattualistica \
-  --categoria normativa
-```
-
-**2. Route Next.js** (nell'altro repo) deve fare:
-- Ricevere il file dal browser
-- POST a `/parse` col secret
-- INSERT su `documenti` (salvare `metadata.content_hash` in `documenti.content_hash`)
-- INSERT su `document_chunks` per ogni elemento in `chunks[]`
-
-**Schema INSERT `document_chunks`:**
-```json
-{
-  "documento_id": "<uuid da documenti>",
-  "chunk_index": 0,
-  "contenuto": "...",
-  "embedding": [0.012, ...],
-  "heading": "Titolo > Sottotitolo",
-  "modulo": "contrattualistica",
-  "categoria": "normativa",
-  "discipline": ["contrattualistica", "normativa-ue"],
-  "tags": ["rimborso", "annullamento"],
-  "entities": {"riferimenti_normativi": ["art. 41 CdT"]}
-}
-```
-
-### B. Cache D4 non attivabile senza INSERT corretto lato caller
-
-`/parse` restituisce `metadata.content_hash` (SHA-256 dei byte del file).
-Il caller **deve** salvarlo in `documenti.content_hash` all'INSERT.
-Senza questo la cache non ha mai hit (lookup per hash → nessun match).
-
-### C. PR #4 e #5 ancora aperte (stantie)
-
-- **PR #4** (`chore: add .env.example`) — `.env.example` è già in `main`; chiuderla
-- **PR #5** (`docs: piano di sviluppo`) — documento superseduto; chiuderla
-
-### D. RLS su 6 tabelle Supabase — debito D7 (sicurezza alta priorità)
-
-Tabelle esposte senza RLS: `istruzioni_agente`, `fonti_online`, `documenti`,
-`conversazioni`, `dati_climatici`, `requisiti_visti`.
-Chiunque con la anon key può leggere/scrivere tutto.
-
-**Non applicare senza prima definire le policy**: abilitare RLS senza policy blocca ogni accesso.
-
-Da fare quando si sa come accede l'app Next.js:
-- Service key lato server → policy che permettono tutto alla service key
-- Anon key dal browser → policy con accesso pubblico in lettura (o con auth utente)
-
-### E. Rate limiting distribuito — debito D1 (priorità media)
-
-Implementazione attuale: in-memory per processo.
-Con più replica Railway il limite non è condiviso.
-Fix: Redis (Upstash, gratuito su Railway). Da fare solo se si scala a più worker.
+| Cosa | Stato |
+|------|-------|
+| Progetto | `ACTIVE_HEALTHY` |
+| Schema RAG (`documenti`, `document_chunks`, `match_chunks`) | ✅ applicato |
+| RLS su tutte le 6 tabelle pubbliche | ✅ abilitata con policy SELECT public |
+| `match_chunks` — search_path fisso | ✅ |
+| `aggiorna_timestamp` — search_path fisso | ✅ |
+| `match_chunks` versione legacy rimossa | ✅ |
+| Indice duplicato `idx_document_chunks_documento` | ✅ rimosso |
+| Security advisor Supabase | **0 ERROR, 2 WARN** (pg_trgm e vector in public — won't-fix, standard Supabase) |
+| Documenti nella KB | **0** — KB vuota, da popolare con `scripts/ingest.py` |
 
 ---
 
-## 5. Come eseguire i test
+## 5. PR aperta
 
-```bash
-pip install -r requirements.txt pytest pytest-asyncio
-pytest tests/ -v
-# Expected: 90 passed
-# Non richiede OPENAI_API_KEY né Supabase: tutto mockato
-```
+**PR #8** `feat: scripts/ingest.py — ingestione standalone KB Supabase (anello A)`
+- URL: https://github.com/tucobpjmr/superagente-parser/pull/8
+- Stato: **draft, mergeable, 0 CI check** (nessun workflow nel repo)
+- Diff: +802 -13 righe su 4 file (`scripts/ingest.py`, `tests/test_ingest.py`, `README.md`, `HANDOFF.md`)
+- Da fare: mergiare in `main` quando pronto (non ha conflitti)
 
 ---
 
-## 6. Roadmap — stato aggiornato
+## 6. Roadmap — stato completo
 
-| Fase | Descrizione | Stato |
+| Item | Descrizione | Stato |
 |------|-------------|-------|
-| 0 | Schema Supabase (pgvector, match_chunks RRF, HNSW, FTS) | ✅ completa — migrazioni applicate |
-| 1.3 | Chunking contestuale (heading_path, contextual text) | ✅ completa |
-| 1.1 | Classificazione multi-disciplina (tassonomia chiusa, batch LLM) | ✅ completa |
-| 1.2 | Entità ponte (norme, importi, date, organismi → jsonb) | ✅ completa |
-| 2 | `POST /search` (decompose + fan-out RRF + rerank) | ✅ completa |
-| 3.1 | `POST /answer` (sintesi con citazioni, anti-allucinazione) | ✅ completa |
-| 3.2 | Golden set di valutazione (22 domande, run_eval.py) | ✅ struttura — chunk_ids da annotare dopo ingestion |
-| D4 | Caching embedding per content_hash | ✅ completa — richiede INSERT corretto lato caller |
-| **A** | **Script ingestione standalone** (`scripts/ingest.py`) | ❌ **mancante — blocca ogni test live** |
-| **B** | **Route Next.js** con INSERT su Supabase | ❌ mancante — nell'altro repo |
-| **C** | Chiudere PR #4 e #5 stantie | 🟡 minore |
-| **D7** | RLS Supabase sulle 6 tabelle | 🔴 alta priorità sicurezza |
-| **D1** | Rate limiting distribuito (Redis/Upstash) | 🟡 solo se si scala |
+| Fase 0 | Schema Supabase (pgvector, match_chunks RRF, HNSW, FTS) | ✅ |
+| Fase 1.1–1.3 | Chunking contestuale, classificazione multi-disciplina, entità | ✅ |
+| Fase 2 | `POST /search` (decompose + fan-out RRF + rerank) | ✅ |
+| Fase 3.1 | `POST /answer` (sintesi con citazioni, anti-allucinazione) | ✅ |
+| Fase 3.2 | Golden set valutazione (22 domande) — struttura pronta | ✅ struttura |
+| D4 | Cache embedding per content_hash | ✅ |
+| **A** | Script ingestione standalone (`scripts/ingest.py`) | ✅ **PR #8** |
+| **D7** | RLS Supabase su 6 tabelle + fix sicurezza funzioni | ✅ **applicato** |
+| C | PR #4 e #5 stantie | ✅ chiuse |
+| **B** | Route Next.js con INSERT su Supabase | ❌ nell'altro repo |
+| **ENV** | `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` su Railway | ⚠️ **da impostare (manuale)** |
+| **KB** | Ingestione documenti reali | ⚠️ **0 doc — blocca smoke test e eval** |
+| Fase 3.2 | Annotare chunk_ids reali in `golden.jsonl` | 🟡 dopo ingestione |
+| D1 | Rate limiting distribuito (Redis/Upstash) | 🟡 solo se si scala |
 | D5 | pytest-cov > 80% su main.py | 🟡 bassa |
 | D6 | Dependency pinning con pip-compile | 🟡 bassa |
 
 ---
 
-## 7. Ordine di esecuzione consigliato — prossima sessione
+## 7. Prossima sessione — roadmap per Claude Cowork
 
-### Step 1 — Impostare env Railway (manuale)
+> **Prerequisiti manuali** (tuo intervento, ~5 min):
+> 1. Mergare PR #8 in `main` su GitHub
+> 2. Railway → aggiungere `SUPABASE_URL` e `SUPABASE_SERVICE_KEY`
+> 3. Ingestione di almeno 3-5 documenti reali dalla tua macchina (istruzioni sotto)
 
-Nel progetto Railway del parser aggiungere:
-- `SUPABASE_URL` = `https://pxtwdhhulobyrheioiex.supabase.co`
-- `SUPABASE_SERVICE_KEY` = dashboard Supabase → Project Settings → API → service_role
-
-Railway dovrebbe rideploy automaticamente da `main` dopo il merge di #7.
-Verificare che `/health` e `/ready` rispondano 200.
-
-### Step 2 — Implementare `scripts/ingest.py`
-
-Prima cosa da fare in sessione: sblocca tutto il resto (test live, eval, cache).
-
-### Step 3 — Smoke test live
-
-Dopo aver ingerito almeno 2-3 documenti reali:
+### Step 1 — Ingestione documenti reali (dalla tua macchina)
 
 ```bash
-# Ingestione
-python scripts/ingest.py \
-  --parser-url $PARSER_URL --secret $SECRET \
-  --supabase-url $SUPABASE_URL --supabase-key $SUPABASE_SERVICE_KEY \
-  --file documento.pdf --modulo contrattualistica --categoria normativa
+# Clona il branch aggiornato (o usa main dopo il merge di PR #8)
+git clone -b claude/handoff-alignment-review-ea2f32 \
+  https://github.com/tucobpjmr/superagente-parser
+cd superagente-parser
+pip install httpx   # unica dipendenza extra (httpx è già in requirements.txt)
 
-# /search
+# Ingestione singolo file
+python scripts/ingest.py \
+  --parser-url https://<railway>.up.railway.app \
+  --secret $PARSER_SHARED_SECRET \
+  --supabase-url https://pxtwdhhulobyrheioiex.supabase.co \
+  --supabase-key $SUPABASE_SERVICE_KEY \
+  --modulo contrattualistica --categoria normativa \
+  --file documento.pdf
+
+# Ingestione intera cartella
+python scripts/ingest.py ... --dir ./documenti-kb --modulo turismo --categoria faq
+
+# Dry-run (verifica senza scrivere)
+python scripts/ingest.py ... --file doc.pdf --dry-run
+```
+
+### Step 2 — Smoke test live (per Claude Cowork, richiede Railway URL + secret)
+
+```bash
+# Liveness
+curl $PARSER_URL/health
+
+# Readiness (verifica OpenAI key e Supabase)
+curl $PARSER_URL/ready
+
+# Search
 curl -X POST $PARSER_URL/search \
   -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" \
   -d '{"domanda":"Il cliente annulla la crociera per malattia: ha diritto al rimborso?"}'
 
-# /answer (stessa domanda — verificare citazioni [n] inline e array citazioni[])
+# Answer (stessa domanda — verificare citazioni [n] e array citazioni[])
 curl -X POST $PARSER_URL/answer \
   -H "Authorization: Bearer $SECRET" \
   -H "Content-Type: application/json" \
@@ -305,11 +196,11 @@ curl -X POST $PARSER_URL/answer \
 ```
 
 Verificare:
-- `/search`: `sotto_domande` ha decomposizione sensata, `risultati` pertinenti, `nome_file` presente
-- `/answer`: risposta con `[n]` inline, array `citazioni[]` allineato agli indici
-- **Anti-allucinazione**: domanda fuori KB → *"Non ho trovato fonti pertinenti…"* (non invenzione)
+- `/search`: `sotto_domande` con decomposizione sensata, `risultati` pertinenti
+- `/answer`: risposta con `[n]` inline, `citazioni[]` allineato agli indici
+- **Anti-allucinazione**: domanda fuori KB → *"Non ho trovato fonti pertinenti…"*
 
-### Step 4 — Baseline eval
+### Step 3 — Baseline eval
 
 ```bash
 python eval/run_eval.py \
@@ -319,39 +210,77 @@ python eval/run_eval.py \
   --json-out eval/baseline_$(date +%Y%m%d).jsonl
 ```
 
-Metriche: recall@k, MRR, discipline coverage (separati mono/multi-disciplina).
 Poi annotare i `chunk_ids` reali in `eval/golden.jsonl` per recall@k affidabile.
 
-### Step 5 — RLS Supabase
+### Step 4 — Route Next.js (altro repo)
 
-Chiedere al proprietario: l'app Next.js accede a Supabase con service_role key
-lato server o con anon key dal browser? Poi scrivere e applicare le migrazioni RLS.
+Deve fare:
+1. Ricevere file dal browser
+2. POST a `/parse` con secret
+3. INSERT su `documenti` (salvare `metadata.content_hash` → abilita cache D4)
+4. INSERT su `document_chunks` per ogni elemento in `chunks[]`
 
-### Step 6 — Chiudere PR #4 e #5
+Schema INSERT `document_chunks`:
+```json
+{
+  "documento_id": "<uuid da documenti>",
+  "chunk_index": 0,
+  "contenuto": "...",
+  "embedding": "[0.012,...]",
+  "heading": "Titolo > Sottotitolo",
+  "modulo": "contrattualistica",
+  "categoria": "normativa",
+  "discipline": ["contrattualistica", "normativa-ue"],
+  "tags": ["rimborso", "annullamento"],
+  "entities": {"riferimenti_normativi": ["art. 41 CdT"]}
+}
+```
 
-Basta chiuderle su GitHub (nessuna azione di codice).
+### Step 5 — Restrizione RLS `conversazioni` (quando si implementa auth)
+
+Attualmente policy permissiva in lettura. Quando l'app avrà auth utente:
+```sql
+-- Sostituire la policy "conversazioni_select_public" con:
+drop policy "conversazioni_select_public" on conversazioni;
+create policy "conversazioni_select_own"
+  on conversazioni for select
+  using (auth.uid()::text = user_id);  -- adattare al nome colonna reale
+```
 
 ---
 
-## 8. Architettura di riferimento
+## 8. Come eseguire i test
+
+```bash
+pip install -r requirements.txt pytest pytest-asyncio
+pytest tests/ -v
+# Expected: 103 passed
+# Non richiede OPENAI_API_KEY né Supabase: tutto mockato
+```
+
+---
+
+## 9. Architettura di riferimento
 
 ```
 Browser
   │
   ▼
-Next.js API route (app/api/parse-file/route.ts)   ← repo separato — ANELLO MANCANTE B
+Next.js API route (app/api/parse-file/route.ts)   ← repo separato — anello B
   │  PARSER_SHARED_SECRET
   ├─► POST /parse  ──► Markitdown OCR → chunker → OpenAI embeddings → enrichment LLM
   │                          │
-  │   INSERT su Supabase ◄───┘   ← ANELLO MANCANTE A (o via scripts/ingest.py)
-  │     documenti.content_hash    (abilita cache D4)
+  │   INSERT su Supabase ◄───┘   ← content_hash obbligatorio (abilita cache D4)
+  │     documenti
   │     document_chunks[]
+  │                     (oppure: python scripts/ingest.py — anello A ✅)
   │
   ├─► POST /search ──► decompose LLM → embed → match_chunks RPC (pgvector+FTS+RRF) → rerank LLM
   └─► POST /answer ──► /search + gpt-4o sintesi con citazioni [n]
 
-Supabase (pxtwdhhulobyrheioiex):
+Supabase (pxtwdhhulobyrheioiex — "super-agente-viaggi" nel dashboard):
   documenti          — metadati file + content_hash + riassunto + n_chunks
   document_chunks    — testo + embedding(1536) + discipline[] + tags[] + entities + fts
   match_chunks RPC   — dense cosine + FTS italian + RRF + boost x1.5 per disciplina
+  RLS                — tutte le tabelle protette, SELECT public, scrittura solo service_role
 ```
