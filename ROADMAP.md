@@ -1,198 +1,119 @@
-# Roadmap — SuperAgente Parser
+# Roadmap — SuperAgente Viaggi
 
-> Aggiornata: 2026-06-09 · branch `claude/super-agent-strategy-ylp0fd`
+> Aggiornata: 2026-10-07 · sostituisce la roadmap del 2026-06-09
 
-Obiettivo: un super agente capace di risolvere problemi complessi che
-richiedono conoscenza multidisciplinare (es. "cliente annulla crociera per
-malattia" → diritto contrattuale + assicurazioni + fiscalità IVA + normativa UE).
+## Obiettivo
 
----
+Un **assistente AI per gli operatori dell'agenzia**, integrato in
+**VoyageDesk** (repo `tucobpjmr/TULLIO`), che risponde a casi complessi e
+multidisciplinari (contratti, assicurazioni, fiscalità, visti, normativa UE)
+citando le fonti. Sostituisce il vecchio "super-agente-viaggi".
+
+## Decisioni prese
+
+| Tema | Decisione |
+|------|-----------|
+| Utenti | Solo operatori dell'agenzia (non clienti finali) |
+| Frontend | VoyageDesk — React 18 + Vite + Supabase (**non** Next.js) |
+| Vecchio agente | Sostituito da questo servizio |
+
+> ⚠️ Il progetto Supabase `vmxvnxsqfisucugcpqlc` (ex "super-agente-viaggi")
+> oggi è il **database di produzione di VoyageDesk**. "Sostituire il vecchio
+> agente" vale per la logica AI, **non** per quel database: non va toccato.
+> La KB RAG resta su `pxtwdhhulobyrheioiex`.
+
+## Architettura target
+
+```
+Operatore (VoyageDesk, login Supabase)
+  │  JWT utente
+  ▼
+Edge Function VoyageDesk `assistente-ai`   ← verifica JWT + ruolo, rate limit
+  │  PARSER_SHARED_SECRET (solo lato server)
+  ▼
+superagente-parser (Railway)
+  ├─ /parse   → ingestione documenti
+  ├─ /search  → retrieval multidisciplinare
+  ├─ /answer  → sintesi con citazioni
+  └─ /agent   → (nuovo) agente con tool + memoria
+        │
+        ▼
+Supabase RAG (pxtwdhhulobyrheioiex)
+```
+
+Il secret del parser non arriva mai al browser.
 
 ## Stato attuale
 
-| Fase | Descrizione | Stato |
-|------|-------------|-------|
-| 0 | Fondamenta Supabase (schema RAG, `match_chunks` RRF) | ✅ Completa |
-| 1.3 | Chunking contestuale (heading gerarchico, riassunto) | ✅ Completa |
-| 1.1 | Classificazione multi-disciplina (tassonomia chiusa) | ✅ Completa |
-| 1.2 | Estrazione entità "ponte" (norme, importi, date, organismi) | ✅ Completa |
-| 2 | Retrieval multidisciplinare (`POST /search`) | 🔲 Da fare |
-| 3.2 | Set di valutazione golden | 🔲 Da fare |
-| 3.1 | Sintesi con citazioni (`POST /answer`) | 🔲 Da fare |
+| Componente | Stato |
+|------------|-------|
+| `/parse`, `/search`, `/answer` | ✅ completi, 90 test verdi |
+| Golden set + `run_eval.py` | ✅ struttura, chunk_ids da annotare |
+| `scripts/ingest.py` + RLS (PR #8) | 🟡 pronti in bozza, da mergiare |
+| KB | 🔴 vuota → `/search` e `/answer` non trovano nulla |
+| Integrazione VoyageDesk | 🔲 assente |
+| CI GitHub Actions (parser) | 🔲 assente |
 
 ---
 
-## Fase 2 — Retrieval multidisciplinare `POST /search`
+## Fase 1 — Sblocco (1 sessione)
 
-**Questo è il cuore del potenziamento.** Stima: 2 sessioni.
+1. Revisione e merge PR #8 (`ingest.py`, RLS).
+   - ⚠️ Rivedere la policy `SELECT public` su `conversazioni`: con la anon key
+     le chat sarebbero leggibili da chiunque. Restringere a `service_role`.
+2. Railway: impostare `SUPABASE_URL` e `SUPABASE_SERVICE_KEY`.
+3. Ingerire 10–20 documenti reali con `scripts/ingest.py`.
+4. Smoke test `/search` e `/answer`, inclusa una domanda fuori KB
+   (deve rispondere "nessuna fonte", non inventare).
 
-### Prerequisiti
+**Fatto quando:** KB popolata e `/answer` restituisce citazioni corrette.
 
-Aggiungere a Railway (e `.env.example`):
-- `SUPABASE_URL=https://pxtwdhhulobyrheioiex.supabase.co`
-- `SUPABASE_SERVICE_KEY=...` (dalla dashboard Supabase → API → service_role)
+## Fase 2 — Qualità misurata (1–2 sessioni)
 
-Dipendenze nuove da aggiungere a `requirements.txt`:
-```
-supabase==2.x      # client async python
-```
+1. Annotare i `chunk_ids` reali in `eval/golden.jsonl`; misurare la baseline
+   (recall@k, MRR, coverage discipline).
+2. Tuning guidato dai numeri: `CHUNK_SIZE`, `top_k`, reranker, modelli.
+3. CI GitHub Actions: `pytest` su ogni PR.
 
-### Endpoint
+**Fatto quando:** baseline salvata e CI verde.
 
-```
-POST /search
-Authorization: Bearer <PARSER_SHARED_SECRET>
-Content-Type: application/json
+## Fase 3 — Da RAG ad agente (2–3 sessioni)
 
-{
-  "domanda": "Il cliente annulla la crociera per malattia: ha diritto al rimborso?",
-  "top_k": 8,
-  "discipline": ["contrattualistica", "assicurazioni"]   // opzionale — boost, non filtro
-}
-```
+1. Nuovo `POST /agent` con tool calling:
+   - `cerca_kb` (pipeline `/search` esistente)
+   - `requisiti_visti`, `dati_climatici`, `fonti_online`
+   - `istruzioni_agente` come prompt di sistema configurabile
+2. Memoria conversazione su tabella `conversazioni` (per operatore).
+3. Risposta in streaming (SSE).
+4. Log di costi e token per richiesta.
 
-### Pipeline interna
+**Fatto quando:** l'agente usa più tool in una risposta, con citazioni, in streaming.
 
-```
-domanda
-  │
-  ▼
-1. Decomposizione (LLM, gpt-4o-mini)
-   → sotto-domande con discipline pertinenti
-   es.:
-     ① "rimborso contrattuale annullamento" → [contrattualistica, turismo]
-     ② "copertura polizza malattia" → [assicurazioni]
-     ③ "trattamento IVA penale annullamento" → [fiscalita]
-  │
-  ▼
-2. Fan-out parallelo (asyncio.gather)
-   Per ogni sotto-domanda:
-     - embedding della sotto-domanda
-     - chiamata match_chunks(embedding, testo, discipline, top_k*2)
-  │
-  ▼
-3. Fusione RRF + deduplica UUID
-  │
-  ▼
-4. Re-ranking (LLM-rerank sulla domanda originale completa)
-   → ordina i top-k finali per rilevanza alla domanda originale
-  │
-  ▼
-5. Risposta
-   [
-     {
-       "id": "uuid",
-       "contenuto": "...",
-       "heading_path": "...",
-       "discipline": ["fiscalita", "turismo"],
-       "score": 0.089,
-       "sotto_domanda": "trattamento IVA penale annullamento",
-       "nome_file": "contratto.pdf",
-       "documento_id": "uuid"
-     }
-   ]
-```
+## Fase 4 — Integrazione in VoyageDesk (2 sessioni, repo TULLIO)
 
-### Dettagli implementativi
+1. Edge Function `assistente-ai`: verifica JWT, ruolo (Admin/Manager/Agent;
+   escluso Driver), rate limit con l'infrastruttura già esistente, proxy al parser.
+2. Modulo UI "Assistente": chat con citazioni cliccabili, storico.
+3. Upload documenti nella KB dal pannello Admin (via `/parse` + INSERT).
+4. Collegamenti utili: da una pratica/cliente aprire l'assistente con il
+   contesto precompilato.
 
-- **Decomposizione**: prompt JSON con `response_format=json_object`; parsing
-  della lista `[{testo, discipline}]`; fallback a domanda singola senza
-  decomposizione.
-- **Query expansion leggera**: riformulazione IT/EN della query prima
-  dell'embedding (i documenti normativi mescolano le due lingue).
-- **Discipline come boost morbido**: passate a `match_chunks` come
-  `filtro_discipline`, non come filtro rigido — già supportato dalla funzione
-  SQL, non esclude chunk di altre discipline.
-- **Nuovo file**: `search.py` (decomposizione + fan-out + fusione); logica
-  DB in `db.py` (client `supabase-py`).
-- **Auth**: stesso `PARSER_SHARED_SECRET` del `/parse`.
+**Fatto quando:** un operatore fa una domanda da VoyageDesk e riceve
+risposta citata, senza secret esposti.
 
-### Nuove env var di Fase 2
+## Fase 5 — Produzione e dismissione vecchio agente (1 sessione)
 
-| Variabile | Default | Uso |
-|-----------|---------|-----|
-| `SUPABASE_URL` | — | URL progetto RAG |
-| `SUPABASE_SERVICE_KEY` | — | Chiave service_role |
-| `SEARCH_TOP_K` | `8` | Risultati finali post-rerank |
-| `SEARCH_DECOMPOSE` | `true` | Attiva/disattiva decomposizione query |
-| `SEARCH_RERANK` | `llm` | `llm` \| `none` |
-| `RERANK_MODEL` | `gpt-4o-mini` | Modello per re-ranking |
+1. Dismettere il vecchio "super-agente-viaggi" (codice/route), dopo verifica
+   che nessuna funzione di VoyageDesk ne dipenda.
+2. Monitoraggio: errori, latenza, costi OpenAI per giorno.
+3. Feedback 👍/👎 sulle risposte → nuove domande nel golden set.
 
----
-
-## Fase 3.2 — Set di valutazione golden
-
-**Da costruire IN PARALLELO alla Fase 2**, non dopo: i numeri guidano il
-tuning di chunk_size, top_k, threshold RRF e scelta del reranker.
-
-### Struttura
-
-```
-eval/
-  golden.jsonl      — 20-30 domande con chunk_ids attesi e disciplina
-  run_eval.py       — misura recall@k e MRR su ogni modifica della pipeline
-  fixtures/
-    sample.pdf      — PDF piccolo reale per test E2E
-```
-
-### Metriche
-
-- **Recall@k**: quanti chunk "golden" compaiono nei top-k risultati?
-- **MRR** (Mean Reciprocal Rank): quanto in alto compare il primo chunk golden?
-- Misurate separatamente per query mono-disciplina e multi-disciplina.
-
-### Domande golden da costruire (esempi)
-
-| Domanda | Discipline attese |
-|---------|-------------------|
-| "Cliente annulla crociera per malattia — ha diritto al rimborso?" | contrattualistica, assicurazioni, turismo |
-| "Come si gestisce l'IVA sulla penale di annullamento di un pacchetto?" | fiscalita, contrattualistica |
-| "Quali documenti servono per un visto Schengen?" | visti-documenti, normativa-ue |
-| "Il fornitore può modificare unilateralmente il prezzo del pacchetto?" | contrattualistica, normativa-ue |
-
----
-
-## Fase 3.1 — Sintesi con citazioni `POST /answer`
-
-Stima: 1 sessione. Può vivere nel microservizio Python o in Next.js (se si
-preferisce streaming verso il browser).
-
-### Endpoint
-
-```
-POST /answer
-{ "domanda": "...", "top_k": 8 }
-→ { "risposta": "...", "citazioni": [{chunk_id, nome_file, sezione, disciplina}] }
-```
-
-### Prompt di sintesi
-
-I chunk vengono raggruppati per disciplina e passati all'LLM con istruzione di:
-1. Integrare le informazioni provenienti da discipline diverse.
-2. Segnalare esplicitamente i punti dove le discipline interagiscono o confliggono.
-3. Citare la fonte con `[doc, sezione]` per ogni affermazione non ovvia.
-4. Se le fonti sono insufficienti, dichiararlo invece di allucinare.
-
----
-
-## Debito tecnico pendente
+## Debito tecnico
 
 | # | Item | Priorità |
 |---|------|----------|
-| D1 | Rate limiting distribuito: l'implementazione in-memory non è condivisa tra più worker Railway. Fix: Redis (Upstash gratuito su Railway). | Media |
-| D2 | Streaming response per documenti > 1000 chunk (risposta JSON > 10 MB). | Bassa |
-| D3 | Job asincrono per parsing di documenti molto grandi (coda + polling `job_id`). | Bassa |
-| D4 | Caching embedding: SHA-256 del contenuto → skip re-embedding di documenti identici. Colonna `content_hash` già nello schema. | Media (Fase 3) |
-| D5 | `pytest-cov`: target > 80% di copertura su `main.py`. | Bassa |
-| D6 | Dependency pinning con `pip-compile`. | Bassa |
-| D7 | RLS su 6 tabelle Supabase (vedi avviso in HANDOFF). | Alta (sicurezza) |
-| D8 | Chiudere PR #4 e PR #5 (supersedute da PR #6). | Bassa |
-
----
-
-## Ordine di esecuzione consigliato per la prossima sessione
-
-1. **Inizia da Fase 2** — è il cuore; la Fase 1 ha preparato esattamente i dati che servono.
-2. **Costruisci il golden set** subito dopo il primo `POST /search` funzionante: hai bisogno dei numeri prima di fare tuning.
-3. **Fase 3.1** per ultima — è il "bello" ma non misurabile senza i numeri della Fase 3.2.
-4. Affronta il debito D7 (RLS) quando conosci le policy di accesso dell'app Next.js.
+| D1 | Rate limit distribuito (Redis) — solo se più repliche | Media |
+| D2 | Streaming per documenti > 1000 chunk | Bassa |
+| D3 | Job asincroni per documenti grandi | Bassa |
+| D5 | Copertura test > 80% su `main.py` | Bassa |
+| D6 | Pinning dipendenze (`pip-compile`) | Bassa |
